@@ -1,0 +1,46 @@
+name: Collect PR Checks
+description: Poll PR checks for the current head commit and summarize failures.
+
+inputs:
+  repository:
+    required: true
+  pr_number:
+    required: true
+  max_wait_minutes:
+    required: false
+    default: "10"
+  poll_interval_seconds:
+    required: false
+    default: "15"
+  no_check_grace_seconds:
+    required: false
+    default: "60"
+  max_summary_chars:
+    required: false
+    default: "12000"
+
+outputs:
+  head_sha:
+    value: ${{ steps.collect.outputs.head_sha }}
+  status:
+    value: ${{ steps.collect.outputs.status }}
+  has_failures:
+    value: ${{ steps.collect.outputs.has_failures }}
+  total_checks:
+    value: ${{ steps.collect.outputs.total_checks }}
+  summary:
+    value: ${{ steps.collect.outputs.summary }}
+
+runs:
+  using: composite
+  steps:
+    - id: collect
+      shell: bash
+      env:
+        REPOSITORY: ${{ inputs.repository }}
+        PR_NUMBER: ${{ inputs.pr_number }}
+        MAX_WAIT_MINUTES: ${{ inputs.max_wait_minutes }}
+        POLL_INTERVAL_SECONDS: ${{ inputs.poll_interval_seconds }}
+        NO_CHECK_GRACE_SECONDS: ${{ inputs.no_check_grace_seconds }}
+        MAX_SUMMARY_CHARS: ${{ inputs.max_summary_chars }}
+      run: "$GITHUB_ACTION_PATH/collect.sh"

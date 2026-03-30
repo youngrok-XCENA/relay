@@ -1,0 +1,60 @@
+name: Post Comment
+description: Post an issue or PR comment with the GitHub API.
+
+inputs:
+  body:
+    required: true
+  target:
+    required: true
+  type:
+    required: false
+    default: issue
+  repository:
+    required: true
+  token:
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Post comment
+      shell: bash
+      env:
+        BODY_INPUT: ${{ inputs.body }}
+        TARGET: ${{ inputs.target }}
+        TARGET_TYPE: ${{ inputs.type }}
+        REPOSITORY: ${{ inputs.repository }}
+        TOKEN_INPUT: ${{ inputs.token }}
+      run: |
+        BODY="$BODY_INPUT"
+        if [ ${#BODY} -gt 65000 ]; then
+          BODY="${BODY:0:64900}
+
+        ...(truncated)"
+        fi
+
+        TOKEN="${TOKEN_INPUT:-${GH_TOKEN:-}}"
+        TOKEN="${TOKEN//$'\r'/}"
+        TOKEN="${TOKEN//$'\n'/}"
+
+        if [ -z "$TOKEN" ]; then
+          echo "GitHub token is required to post a comment." >&2
+          exit 1
+        fi
+
+        RESPONSE_FILE=$(mktemp)
+        PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
+        HTTP_STATUS=$(curl -sS -o "$RESPONSE_FILE" -w '%{http_code}' \
+          -X POST \
+          -H "Authorization: token ${TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          -H "Content-Type: application/json" \
+          "https://api.github.com/repos/${REPOSITORY}/issues/${TARGET}/comments" \
+          -d "$PAYLOAD")
+
+        if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+          cat "$RESPONSE_FILE" >&2
+          exit 1
+        fi

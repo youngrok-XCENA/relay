@@ -1,0 +1,99 @@
+name: Code Style
+
+on:
+  workflow_call:
+    inputs:
+      excluded_paths:
+        type: string
+        default: "module/|out/|build/"
+      file_extensions:
+        type: string
+        default: "*.cpp *.hpp *.h *.cc"
+      clang_format_version:
+        type: string
+        default: "17"
+    secrets:
+      GH_PAT:
+        required: false
+
+jobs:
+  clang-format:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT || github.token }}
+          submodules: false
+          fetch-depth: 0
+
+      - name: Install clang-format
+        id: clang-format
+        shell: bash
+        env:
+          CLANG_FORMAT_VERSION: ${{ inputs.clang_format_version }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "clang-format-${CLANG_FORMAT_VERSION}" || sudo apt-get install -y clang-format
+
+          if command -v "clang-format-${CLANG_FORMAT_VERSION}" >/dev/null 2>&1; then
+            echo "bin=$(command -v "clang-format-${CLANG_FORMAT_VERSION}")" >> "$GITHUB_OUTPUT"
+          else
+            echo "bin=$(command -v clang-format)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get changed source files
+        id: changed-files
+        shell: bash
+        env:
+          FILE_EXTENSIONS: ${{ inputs.file_extensions }}
+          EXCLUDED_PATHS: ${{ inputs.excluded_paths }}
+        run: |
+          base_sha=${{ github.event.pull_request.base.sha }}
+          head_sha=${{ github.event.pull_request.head.sha }}
+
+          read -r -a patterns <<< "$FILE_EXTENSIONS"
+          files=$(git diff --name-only --diff-filter=ACMR "$base_sha" "$head_sha" -- "${patterns[@]}" || true)
+
+          if [ -n "$EXCLUDED_PATHS" ]; then
+            files=$(printf "%s\n" "$files" | grep -Ev "^(${EXCLUDED_PATHS})" || true)
+          fi
+
+          files=$(printf "%s\n" "$files" | sed '/^$/d')
+
+          {
+            echo "files<<GHEOF"
+            echo "$files"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run clang-format check
+        shell: bash
+        env:
+          FILES: ${{ steps.changed-files.outputs.files }}
+          CLANG_FORMAT_BIN: ${{ steps.clang-format.outputs.bin }}
+        run: |
+          if [ -z "$FILES" ]; then
+            echo "No changed source files to check."
+            exit 0
+          fi
+
+          failed=0
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            echo "Checking: $file"
+            if ! "$CLANG_FORMAT_BIN" --style=file --dry-run --Werror "$file"; then
+              failed=1
+              echo ""
+              echo "Formatting diff for $file:"
+              diff -u "$file" <("$CLANG_FORMAT_BIN" --style=file "$file") || true
+              echo ""
+            fi
+          done <<< "$FILES"
+
+          if [ "$failed" -ne 0 ]; then
+            echo "Some files need clang-format. Run: ${CLANG_FORMAT_BIN} --style=file -i <file>"
+            exit 1
+          fi
+
+          echo "All changed files are properly formatted."

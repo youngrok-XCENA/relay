@@ -1,0 +1,171 @@
+name: Codex
+on:
+  issues:
+    types: [opened, reopened, closed, labeled]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  schedule:
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+jobs:
+  scheduled_context:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      issue_date: ${{ steps.issue_metadata.outputs.issue_date }}
+      issue_title: ${{ steps.issue_metadata.outputs.issue_title }}
+    steps:
+      - name: Compute scheduled issue metadata
+        id: issue_metadata
+        shell: bash
+        run: |
+          issue_date="$(TZ=Asia/Seoul date +%F)"
+          echo "issue_date=${issue_date}" >> "$GITHUB_OUTPUT"
+          echo "issue_title=[scheduled ci] codex-auto design improvement ${issue_date}" >> "$GITHUB_OUTPUT"
+
+  scheduled-issue:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: scheduled_context
+    concurrency:
+      group: scheduled-issue-${{ github.repository }}-${{ needs.scheduled_context.outputs.issue_date }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT }}
+      REPO: ${{ github.repository }}
+      ISSUE_TITLE: ${{ needs.scheduled_context.outputs.issue_title }}
+    steps:
+      - name: Validate GH_PAT for scheduled automation
+        shell: bash
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "GH_PAT is required for scheduled issue creation." >&2
+            exit 1
+          fi
+
+          if ! gh api "repos/$REPO" >/dev/null 2>&1; then
+            echo "GH_PAT is invalid or cannot access $REPO." >&2
+            exit 1
+          fi
+
+      - name: Create daily codex-auto issue
+        shell: bash
+        run: |
+          existing_issue=$(gh issue list \
+            --repo "$REPO" \
+            --state open \
+            --search "in:title \"$ISSUE_TITLE\"" \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [ -n "$existing_issue" ]; then
+            echo "Scheduled issue already exists: #${existing_issue}"
+            exit 0
+          fi
+
+          gh issue create \
+            --repo "$REPO" \
+            --title "$ISSUE_TITLE" \
+            --body "$(cat <<'EOF'
+          매일 오전 5시(Asia/Seoul)에 실행되는 scheduled codex-auto CI입니다.
+
+          현재 기본 브랜치 코드를 분석해서 설계 관점에서 가장 가치 높은 개선 아이템을 정확히 한 가지 선정해 주세요.
+          선정한 그 한 가지 아이템만 구현하고, 관련 없는 리팩터링은 하지 마세요.
+          변경 후에는 가능한 범위에서 검증까지 수행하고 결과를 정리해 주세요.
+          EOF
+          )"
+
+  review:
+    if: >
+      startsWith(github.event.comment.body, '/codex-review') &&
+      (
+        github.event_name == 'pull_request_review_comment' ||
+        (github.event_name == 'issue_comment' && github.event.issue.pull_request)
+      )
+    uses: youngrok-XCENA/relay/.github/workflows/codex.yml@main
+    with:
+      mode: review
+      project_description: "GitHub Actions reusable CI workflows (YAML/Shell)"
+      code_style_guide: "YAML/Shell scripting conventions"
+      file_extensions: "*.yml *.yaml *.sh *.md"
+      codex_sandbox: "read-only"
+      timeout_minutes: 15
+    secrets:
+      GH_PAT: ${{ secrets.GH_PAT }}
+
+  fix:
+    if: >
+      github.event_name == 'issue_comment' &&
+      !github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/codex-fix')
+    uses: youngrok-XCENA/relay/.github/workflows/codex.yml@main
+    with:
+      mode: fix
+      project_description: "GitHub Actions reusable CI workflows (YAML/Shell)"
+      build_command: ""
+      test_command: ""
+      code_style_guide: "YAML/Shell scripting conventions"
+      base_branch: "main"
+      codex_sandbox: "full-auto"
+      timeout_minutes: 30
+    secrets:
+      GH_PAT: ${{ secrets.GH_PAT }}
+
+  triage:
+    if: >
+      (github.event_name == 'issues' &&
+       (
+         github.event.action == 'closed' ||
+         (
+           (github.event.action == 'opened' || github.event.action == 'reopened') &&
+           contains(github.event.issue.title, 'codex') &&
+           !contains(github.event.issue.title, 'codex-auto')
+         )
+       )) ||
+      (github.event_name == 'issue_comment' &&
+       !github.event.issue.pull_request &&
+       startsWith(github.event.comment.body, '/codex-issue') &&
+       github.event.comment.user.type != 'Bot' &&
+       github.event.sender.login != 'github-actions[bot]')
+    uses: youngrok-XCENA/relay/.github/workflows/codex.yml@main
+    with:
+      mode: triage
+      project_description: "GitHub Actions reusable CI workflows (YAML/Shell)"
+      trigger_command: "/codex-issue"
+      title_keyword: "codex"
+      auto_title_keyword: "codex-auto"
+      codex_sandbox: "read-only"
+      timeout_minutes: 20
+    secrets:
+      GH_PAT: ${{ secrets.GH_PAT }}
+
+  auto-pipeline:
+    if: >
+      github.event_name == 'issues' &&
+      (
+        (
+          (github.event.action == 'opened' || github.event.action == 'reopened') &&
+          contains(github.event.issue.title, 'codex-auto')
+        ) ||
+        (
+          github.event.action == 'labeled' &&
+          github.event.label.name == 'auto-fix'
+        )
+      )
+    uses: youngrok-XCENA/relay/.github/workflows/codex.yml@main
+    with:
+      mode: auto-pipeline
+      project_description: "GitHub Actions reusable CI workflows (YAML/Shell)"
+      code_style_guide: "YAML/Shell scripting conventions"
+      file_extensions: "*.yml *.yaml *.sh *.json"
+      auto_title_keyword: "codex-auto"
+      codex_sandbox: "full-auto"
+      timeout_minutes: 60
+    secrets:
+      GH_PAT: ${{ secrets.GH_PAT }}

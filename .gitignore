@@ -1,0 +1,9 @@
+.codex
+.omc/
+_result/
+_plan/
+_design/
+docs/*
+!docs/test-scenario.md
+!docs/test-guide.md
+!docs/design.md

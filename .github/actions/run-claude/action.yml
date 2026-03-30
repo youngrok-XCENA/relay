@@ -1,0 +1,165 @@
+name: Run Claude
+description: Execute Claude CLI and normalize outputs, failure types, and optional session persistence.
+
+inputs:
+  prompt:
+    required: true
+  resume_prompt:
+    required: false
+    default: ""
+  model:
+    required: false
+    default: claude-sonnet-4-6
+  max_turns:
+    required: false
+    default: "30"
+  output_format:
+    required: false
+    default: text
+  resume_session:
+    required: false
+    default: "false"
+  session_id:
+    required: false
+    default: ""
+  session_file:
+    required: false
+    default: ""
+
+outputs:
+  result:
+    value: ${{ steps.run.outputs.result }}
+  exit_code:
+    value: ${{ steps.run.outputs.exit_code }}
+  failure_type:
+    value: ${{ steps.run.outputs.failure_type }}
+  session_id:
+    value: ${{ steps.run.outputs.session_id }}
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        PROMPT: ${{ inputs.prompt }}
+        RESUME_PROMPT: ${{ inputs.resume_prompt }}
+        MODEL: ${{ inputs.model }}
+        MAX_TURNS: ${{ inputs.max_turns }}
+        OUTPUT_FORMAT: ${{ inputs.output_format }}
+        RESUME_SESSION: ${{ inputs.resume_session }}
+        SESSION_ID_INPUT: ${{ inputs.session_id }}
+        SESSION_FILE: ${{ inputs.session_file }}
+      run: |
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+        PROMPT_FILE=$(mktemp)
+        OUTPUT_FILE=$(mktemp)
+        STDERR_FILE=$(mktemp)
+
+        RESULT=""
+        EXIT_CODE=1
+        NEW_SESSION_ID=""
+        FAILURE_TYPE="generic"
+
+        # --- Try session resume ---
+        if [ "$RESUME_SESSION" = "true" ] && [ -n "$SESSION_ID_INPUT" ]; then
+          RESUME_TEXT="$PROMPT"
+          if [ -n "$RESUME_PROMPT" ]; then
+            RESUME_TEXT="$RESUME_PROMPT"
+          fi
+
+          printf "%s" "$RESUME_TEXT" > "$PROMPT_FILE"
+
+          echo "::group::Attempting Claude session resume (${SESSION_ID_INPUT})"
+          set +e
+          set -o pipefail
+          claude --print \
+            --resume "$SESSION_ID_INPUT" \
+            --model "$MODEL" \
+            --max-turns "$MAX_TURNS" \
+            --output-format "$OUTPUT_FORMAT" \
+            < "$PROMPT_FILE" 2>"$STDERR_FILE" | tee "$OUTPUT_FILE"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set +o pipefail
+          set -e
+          echo "::endgroup::"
+
+          if [ "$EXIT_CODE" = "0" ] && [ -s "$OUTPUT_FILE" ]; then
+            if [ "$OUTPUT_FORMAT" = "json" ]; then
+              RESULT=$(jq -r '.result // empty' "$OUTPUT_FILE" 2>/dev/null || true)
+              NEW_SESSION_ID=$(jq -r '.session_id // empty' "$OUTPUT_FILE" 2>/dev/null || true)
+            else
+              RESULT=$(head -c 60000 "$OUTPUT_FILE" 2>/dev/null || true)
+            fi
+          fi
+
+          if [ -z "$RESULT" ]; then
+            echo "::warning::Session resume failed (exit=${EXIT_CODE}), falling back to fresh session"
+            cat "$STDERR_FILE" >&2 2>/dev/null || true
+            if [ -n "$SESSION_FILE" ]; then
+              rm -f "$SESSION_FILE"
+            fi
+            EXIT_CODE=1
+          fi
+        fi
+
+        # --- Fallback: fresh session ---
+        if [ -z "$RESULT" ]; then
+          printf "%s" "$PROMPT" > "$PROMPT_FILE"
+
+          echo "::group::Running fresh Claude session"
+          set +e
+          set -o pipefail
+          claude --print \
+            --model "$MODEL" \
+            --max-turns "$MAX_TURNS" \
+            --output-format "$OUTPUT_FORMAT" \
+            < "$PROMPT_FILE" 2>"$STDERR_FILE" | tee "$OUTPUT_FILE"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set +o pipefail
+          set -e
+          echo "::endgroup::"
+
+          if [ -s "$OUTPUT_FILE" ]; then
+            if [ "$OUTPUT_FORMAT" = "json" ]; then
+              RESULT=$(jq -r '.result // empty' "$OUTPUT_FILE" 2>/dev/null || true)
+              NEW_SESSION_ID=$(jq -r '.session_id // empty' "$OUTPUT_FILE" 2>/dev/null || true)
+
+              # If JSON parsing failed, use raw output
+              if [ -z "$RESULT" ] && [ "$EXIT_CODE" = "0" ]; then
+                RESULT=$(head -c 60000 "$OUTPUT_FILE" 2>/dev/null || true)
+              fi
+            else
+              RESULT=$(head -c 60000 "$OUTPUT_FILE" 2>/dev/null || true)
+            fi
+          fi
+        fi
+
+        # --- Save session ID ---
+        if [ -n "$SESSION_FILE" ] && [ -n "$NEW_SESSION_ID" ]; then
+          echo "$NEW_SESSION_ID" > "$SESSION_FILE"
+          echo "::notice::Saved session ${NEW_SESSION_ID} for next run"
+        fi
+
+        # --- Detect failure types ---
+        COMBINED="$RESULT $(cat "$STDERR_FILE" 2>/dev/null || true)"
+        if [ "$EXIT_CODE" != "0" ] && printf "%s" "$COMBINED" | grep -Eiq 'usage[ -]?limit|rate[ -]?limit|quota|too many requests|insufficient credits|credit balance|billing hard limit'; then
+          FAILURE_TYPE="usage_limit"
+        elif [ "$EXIT_CODE" != "0" ] && printf "%s" "$COMBINED" | grep -Eiq 'authentication failed|unauthorized|invalid.*token|api key.*invalid|401 '; then
+          FAILURE_TYPE="auth_error"
+        fi
+
+        RESULT=$(printf "%s" "$RESULT" | head -c 60000)
+
+        rm -f "$PROMPT_FILE" "$OUTPUT_FILE" "$STDERR_FILE"
+
+        {
+          echo "result<<GHEOF"
+          echo "$RESULT"
+          echo "GHEOF"
+          echo "exit_code=${EXIT_CODE}"
+          echo "failure_type=${FAILURE_TYPE}"
+          echo "session_id=${NEW_SESSION_ID}"
+        } >> "$GITHUB_OUTPUT"
