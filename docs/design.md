@@ -7,7 +7,6 @@
 - `claude.yml`
 - `codex.yml`
 
-여기는 일반 lint / static analysis 모음이 아니라 `agent ci workflow repo`라는 전제를 둔다. 그래서 `code-style`, `cppcheck`은 제거했다.
 
 ## 아키텍처 개요
 

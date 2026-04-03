@@ -29,10 +29,10 @@ on:
         default: ""
       file_extensions:
         type: string
-        default: "*.cpp *.hpp *.h *.c"
+        default: ""
       review_focus:
         type: string
-        default: "correctness,memory-safety,thread-safety,performance"
+        default: ""
       max_diff_size:
         type: number
         default: 100000
@@ -80,7 +80,7 @@ on:
         default: 15
       max_check_fix_attempts:
         type: number
-        default: 1
+        default: 3
       runner:
         type: string
         default: '["self-hosted", "codex-ci"]'
@@ -390,7 +390,17 @@ jobs:
           - Do not modify files outside the scope of this issue.
           - Do not post issue comments, create PRs, or use GitHub tools for side effects.
           - Do not describe tool/auth limitations in the final response.
-          - Return only the work summary; the workflow handles GitHub updates."
+          - Do not include meta-commentary about your own process.
+          - Return ONLY the work summary in the following format, with no preamble:
+
+          ### Why
+          Explain why this change is needed. What problem exists if this is not applied?
+
+          ### What changed
+          Describe what was changed concisely.
+
+          ### Design changes (optional)
+          If there are structural changes (e.g. call flow, module boundaries, data flow), include a mermaid diagram. Skip this section if the change is simple (config, typo, single-function edit)."
 
           {
             echo "prompt<<GHEOF"
@@ -467,24 +477,17 @@ jobs:
           fi
 
           PR_BODY_FILE=$(mktemp)
-          if [ -n "$PR_TEMPLATE" ]; then
-            printf "%s" "$PR_TEMPLATE" > "$PR_BODY_FILE"
-          else
-            {
-              echo "## 📌 PR 요약"
-              echo "- fix: ${ISSUE_TITLE} (#${ISSUE_NUMBER})"
-              echo ""
-              echo "## 📝 상세 내용"
-              echo "${RESULT}" | head -c 60000
-              echo ""
-              echo "## 🔗 관련 이슈(선택)"
-              echo "- Closes #${ISSUE_NUMBER}"
-              echo ""
-              echo "## 📦 Release Note (자동 생성용 / 영문 작성)"
-              echo "### FIXED"
-              echo "- ${ISSUE_TITLE} (#${ISSUE_NUMBER})"
-            } > "$PR_BODY_FILE"
-          fi
+          {
+            echo "${RESULT}" | head -c 60000
+            echo ""
+            echo "---"
+            echo ""
+            if [ -n "$PR_TEMPLATE" ]; then
+              printf "%s" "$PR_TEMPLATE"
+            fi
+            echo ""
+            echo "Closes #${ISSUE_NUMBER}"
+          } > "$PR_BODY_FILE"
 
           PR_URL=$(gh pr create \
             --repo "${{ github.repository }}" \
@@ -675,14 +678,16 @@ jobs:
             ${{ github.event.issue.body }}
 
             ## Task
-            Analyze this issue and provide a concise technical analysis:
-            - **Root Cause**: What is causing this issue?
+            Determine whether this issue is a bug report, an improvement request, or a general task. Then provide a concise technical analysis:
+            - **Type**: Bug / Improvement / Task
             - **Scope**: Which files/components are affected?
-            - **Fix Approach**: How should this be fixed?
+            - **Action Plan**: Concrete steps to address this issue (fix, refactor, or new implementation).
             - **Risks**: Any potential side effects?
 
             ## Rules
             - Be concise and specific.
+            - Do not include meta-commentary about your own process.
+            - Start directly with the analysis content.
             - Do not post issue comments, create PRs, or use GitHub tools for side effects.
             - Do not describe tool/auth limitations in the final response.
             - Return only the analysis body text.
@@ -755,7 +760,17 @@ jobs:
           - Do not modify files outside the scope of this issue.
           - Do not post issue comments, create PRs, or use GitHub tools for side effects.
           - Do not describe tool/auth limitations in the final response.
-          - Return only the work summary; the workflow handles GitHub updates."
+          - Do not include meta-commentary about your own process.
+          - Return ONLY the work summary in the following format, with no preamble:
+
+          ### Why
+          Explain why this change is needed. What problem exists if this is not applied?
+
+          ### What changed
+          Describe what was changed concisely.
+
+          ### Design changes (optional)
+          If there are structural changes (e.g. call flow, module boundaries, data flow), include a mermaid diagram. Skip this section if the change is simple (config, typo, single-function edit)."
 
           {
             echo "prompt<<GHEOF"
@@ -833,24 +848,17 @@ jobs:
           fi
 
           PR_BODY_FILE=$(mktemp)
-          if [ -n "$PR_TEMPLATE" ]; then
-            printf "%s" "$PR_TEMPLATE" > "$PR_BODY_FILE"
-          else
-            {
-              echo "## 📌 PR 요약"
-              echo "- fix: ${ISSUE_TITLE} (#${ISSUE_NUMBER})"
-              echo ""
-              echo "## 📝 상세 내용"
-              echo "${RESULT}" | head -c 60000
-              echo ""
-              echo "## 🔗 관련 이슈(선택)"
-              echo "- Closes #${ISSUE_NUMBER}"
-              echo ""
-              echo "## 📦 Release Note (자동 생성용 / 영문 작성)"
-              echo "### FIXED"
-              echo "- ${ISSUE_TITLE} (#${ISSUE_NUMBER})"
-            } > "$PR_BODY_FILE"
-          fi
+          {
+            echo "${RESULT}" | head -c 60000
+            echo ""
+            echo "---"
+            echo ""
+            if [ -n "$PR_TEMPLATE" ]; then
+              printf "%s" "$PR_TEMPLATE"
+            fi
+            echo ""
+            echo "Closes #${ISSUE_NUMBER}"
+          } > "$PR_BODY_FILE"
 
           PR_URL=$(gh pr create \
             --repo "${{ github.repository }}" \
@@ -1144,7 +1152,7 @@ jobs:
           "${formatter[@]}" "${changed_files[@]}"
 
       - name: Commit and push checks fix attempt 1
-        if: steps.cifix.outputs.exit_code == '0'
+        if: steps.cifix.outcome == 'success' && steps.cifix.outputs.exit_code == '0'
         id: cifix_push
         shell: bash
         env:
@@ -1273,7 +1281,7 @@ jobs:
           "${formatter[@]}" "${changed_files[@]}"
 
       - name: Commit and push checks fix attempt 2
-        if: steps.cifix_2.outputs.exit_code == '0'
+        if: steps.cifix_2.outcome == 'success' && steps.cifix_2.outputs.exit_code == '0'
         id: cifix_2_push
         shell: bash
         env:
@@ -1402,7 +1410,7 @@ jobs:
           "${formatter[@]}" "${changed_files[@]}"
 
       - name: Commit and push checks fix attempt 3
-        if: steps.cifix_3.outputs.exit_code == '0'
+        if: steps.cifix_3.outcome == 'success' && steps.cifix_3.outputs.exit_code == '0'
         id: cifix_3_push
         shell: bash
         env:
@@ -1692,75 +1700,7 @@ jobs:
           | 4. 코드 리뷰 | ${REVIEW_STATUS} |
           | 5. 리뷰 반영 | ${PRFIX_STATUS} |
           | 6. PR checks 확인 | ${CHECKS_STATUS} |
-          | 7. checks 실패 반영 | ${CHECKS_FIX_STATUS} |
-
-          <details><summary>패치 작업 내용</summary>
-
-          ${FIX_RESULT}
-
-          </details>"
-
-            if [ "$NEEDS_FIX" = "true" ] && [ -n "$PRFIX_RESULT" ]; then
-              BODY="${BODY}
-
-          <details><summary>리뷰 반영 내용</summary>
-
-          ${PRFIX_RESULT}
-
-          </details>"
-            fi
-
-            if [ "$PR_CHECK_STATUS" != "passed" ] && [ "$PR_CHECK_STATUS" != "no_checks" ] && [ -n "$PR_CHECK_SUMMARY" ]; then
-              BODY="${BODY}
-
-          <details><summary>PR checks 확인 결과</summary>
-
-          ${PR_CHECK_SUMMARY}
-
-          </details>"
-            fi
-
-            if [ -n "$CI_FIX_1_RESULT" ]; then
-              BODY="${BODY}
-
-          <details><summary>checks 실패 반영 내용 (1차)</summary>
-
-          ${CI_FIX_1_RESULT}
-
-          </details>"
-            fi
-
-            if [ -n "$CI_FIX_2_RESULT" ]; then
-              BODY="${BODY}
-
-          <details><summary>checks 실패 반영 내용 (2차)</summary>
-
-          ${CI_FIX_2_RESULT}
-
-          </details>"
-            fi
-
-            if [ -n "$CI_FIX_3_RESULT" ]; then
-              BODY="${BODY}
-
-          <details><summary>checks 실패 반영 내용 (3차)</summary>
-
-          ${CI_FIX_3_RESULT}
-
-          </details>"
-            fi
-
-            if [ "$FINAL_CHECK_STATUS" != "$PR_CHECK_STATUS" ] && [ "$FINAL_CHECK_STATUS" != "passed" ] && [ "$FINAL_CHECK_STATUS" != "no_checks" ] && [ -n "$FINAL_CHECK_SUMMARY" ]; then
-              BODY="${BODY}
-
-          <details><summary>최종 PR checks 결과</summary>
-
-          ${FINAL_CHECK_SUMMARY}
-
-          </details>"
-            fi
-
-            BODY="${BODY}${FOOTER}"
+          | 7. checks 실패 반영 | ${CHECKS_FIX_STATUS} |${FOOTER}"
           fi
 
           {
@@ -1970,11 +1910,14 @@ jobs:
             FULL_PROMPT="${FULL_PROMPT}
 
           ## Instructions
-          - Identify which code modules and files are relevant to this issue.
-          - Assess the impact and scope of the issue.
-          - Suggest possible fix directions if applicable.
+          - Determine whether this issue is a bug report, an improvement request, or a general task.
+          - Identify which code modules and files are relevant.
+          - Assess the impact and scope.
+          - Suggest a concrete action plan (fix, refactor, or new implementation).
           - If the issue lacks information, list what additional details are needed.
           - Be concise and actionable.
+          - Do not include meta-commentary about your own process.
+          - Start directly with the analysis content.
           - Reference specific file paths and function names from the codebase.
           - Return only the analysis body text.
           - Do not post comments or use GitHub tools for side effects.

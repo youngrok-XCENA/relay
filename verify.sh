@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Agent CI installation verifier
-# Usage: bash <(gh api repos/youngrok-XCENA/relay/contents/verify.sh --jq '.content' | base64 -d)
+# Usage: curl -sL https://raw.githubusercontent.com/youngrok-XCENA/relay/main/verify.sh | bash
 
 set -euo pipefail
 

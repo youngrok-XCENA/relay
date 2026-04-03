@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Agent CI workflow installer
-# Usage: GH_PAT=<token> bash <(gh api repos/youngrok-XCENA/relay/contents/install.sh --jq '.content' | base64 -d)
+# Usage: GH_PAT=<token> curl -sL https://raw.githubusercontent.com/youngrok-XCENA/relay/main/install.sh | bash
 
 set -euo pipefail
 
 VERSION="1.0.0"
 RUNNER_BASE="$HOME/actions-runners"
-ALL_WORKFLOWS="claude codex"
-DEFAULT_FILE_EXTENSIONS="*.c *.cc *.cpp *.cxx *.h *.hh *.hpp *.hxx *.py *.rs *.go *.java *.kt *.js *.jsx *.ts *.tsx *.mjs *.cjs *.json *.yml *.yaml *.sh"
+AVAILABLE_AGENTS=""
 CI_REPO="youngrok-XCENA/relay"
 
 # ─── Output helpers ───
@@ -39,6 +38,39 @@ check_deps() {
     echo "  git: https://git-scm.com" >&2
     echo "  gh:  https://cli.github.com" >&2
     echo "  jq:  sudo apt install jq" >&2
+    exit 1
+  fi
+}
+
+# ─── Agent auth detection ───
+
+detect_available_agents() {
+  AVAILABLE_AGENTS=""
+
+  if command -v claude &>/dev/null && [ -f "$HOME/.claude/.credentials.json" ] \
+     && jq -e '.claudeAiOauth.accessToken' "$HOME/.claude/.credentials.json" &>/dev/null; then
+    AVAILABLE_AGENTS="claude"
+    ok "Claude 인증 확인됨"
+  else
+    info "Claude 미설치 또는 미인증 — 건너뜀"
+  fi
+
+  if command -v codex &>/dev/null && [ -f "$HOME/.codex/auth.json" ] \
+     && jq -e '.tokens' "$HOME/.codex/auth.json" &>/dev/null; then
+    AVAILABLE_AGENTS="$AVAILABLE_AGENTS codex"
+    ok "Codex 인증 확인됨"
+  else
+    info "Codex 미설치 또는 미인증 — 건너뜀"
+  fi
+
+  AVAILABLE_AGENTS=$(echo "$AVAILABLE_AGENTS" | xargs)
+
+  if [ -z "$AVAILABLE_AGENTS" ]; then
+    err "인증된 AI agent가 없습니다."
+    echo "" >&2
+    echo "Claude 또는 Codex 중 하나 이상 설치하고 로그인하세요:" >&2
+    echo "  claude: https://docs.anthropic.com/en/docs/claude-code" >&2
+    echo "  codex:  https://github.com/openai/codex" >&2
     exit 1
   fi
 }
@@ -308,6 +340,49 @@ jobs:
 EOF
 }
 
+generate_schedule() {
+  local agent="$1"
+  version_stamp
+  cat <<SEOF
+# 스케줄 CI (${agent}) — 주석을 해제하고 프로젝트에 맞게 수정하세요.
+#
+# name: Scheduled CI (${agent})
+# on:
+#   schedule:
+#     - cron: '0 18 * * *'   # UTC 18:00 = KST 03:00
+#   workflow_dispatch:        # 수동 실행도 가능
+# permissions:
+#   contents: write
+#   issues: write
+#   pull-requests: write
+# env:
+#   GH_TOKEN: \${{ secrets.GH_PAT }}
+# jobs:
+#   create-issue:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Create scheduled issue
+#         shell: bash
+#         env:
+#           REPO: \${{ github.repository }}
+#         run: |
+#           ISSUE_DATE="\$(TZ=Asia/Seoul date +%F)"
+#           TITLE="${agent}-auto 설계 개선 \${ISSUE_DATE}"
+#
+#           # 같은 날 이미 생성된 이슈가 있으면 스킵
+#           EXISTING=\$(gh issue list --repo "\$REPO" --state open \\
+#             --search "in:title \\"\$TITLE\\"" --json number --jq '.[0].number // empty')
+#           if [ -n "\$EXISTING" ]; then
+#             echo "이미 존재: #\${EXISTING}"
+#             exit 0
+#           fi
+#
+#           gh issue create --repo "\$REPO" \\
+#             --title "\$TITLE" \\
+#             --body "현재 코드에서 가장 가치 있는 설계 개선 하나를 골라 수정해 주세요."
+SEOF
+}
+
 # ─── Workflow helpers ───
 
 caller_filename_for_workflow() {
@@ -364,21 +439,32 @@ install_workflows() {
   local desc style exts build test_cmd
   local workflow_dir="$repo_root/.github/workflows"
 
-  desc="GitHub repository $repo"
+  desc=""
   style=""
-  exts="$DEFAULT_FILE_EXTENSIONS"
+  exts=""
   build=""
   test_cmd=""
 
   mkdir -p "$workflow_dir"
 
-  for wf in $ALL_WORKFLOWS; do
+  for wf in $AVAILABLE_AGENTS; do
     local filename filepath content
     filename=$(caller_filename_for_workflow "$wf")
     filepath="$workflow_dir/$filename"
     content=$(render_workflow_content "$wf" "$desc" "$style" "$exts" "$build" "$test_cmd" "$base")
     printf '%s' "$content" > "$filepath"
     ok "$filename 생성"
+  done
+
+  # agent별 schedule yml 생성 (없을 때만 — 사용자가 수정했을 수 있으므로)
+  for agent in $AVAILABLE_AGENTS; do
+    local schedule_path="$workflow_dir/${agent}-schedule.yml"
+    if [ ! -f "$schedule_path" ]; then
+      generate_schedule "$agent" > "$schedule_path"
+      ok "${agent}-schedule.yml 생성 (주석 해제 후 사용)"
+    else
+      ok "${agent}-schedule.yml 이미 존재 — 건너뜀"
+    fi
   done
 
   cleanup_stale_local_workflows "$repo_root"
@@ -443,7 +529,7 @@ install_runners() {
     ok "Runner v${runner_version} 다운로드 완료"
   fi
 
-  for runner_type in claude codex; do
+  for runner_type in $AVAILABLE_AGENTS; do
     local runner_dir="$RUNNER_BASE/$repo/$runner_type"
     local label="${runner_type}-ci"
     local name="${runner_type}-ci-runner-${repo_name}"
@@ -504,6 +590,7 @@ EOF
   fi
 
   check_deps
+  detect_available_agents
 
   # Git repo 감지
   local repo_root repo base
@@ -548,13 +635,38 @@ EOF
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   ok "설치 완료: $repo"
   echo ""
-  echo "생성된 파일을 커밋하세요:"
+  echo "프로젝트에 맞게 설정하세요:"
+  for wf in $AVAILABLE_AGENTS; do
+    local filename
+    filename=$(caller_filename_for_workflow "$wf")
+    echo "  .github/workflows/$filename"
+  done
+  echo ""
+  echo "  설정 가능 항목:"
+  echo "    project_description  — 프로젝트 설명 (AI 컨텍스트)"
+  echo "    build_command        — 빌드 명령 (fix 후 검증)"
+  echo "    test_command         — 테스트 명령 (fix 후 검증)"
+  echo "    code_style_guide     — 코딩 스타일 가이드"
+  echo "    file_extensions      — 리뷰 대상 파일 패턴"
+  echo ""
+  echo "스케줄 CI (선택):"
+  for agent in $AVAILABLE_AGENTS; do
+    echo "  .github/workflows/${agent}-schedule.yml"
+  done
+  echo "  주석을 해제하면 매일 지정 시각에 자동으로 개선 이슈를 생성합니다."
+  echo ""
+  echo "커밋 & 푸시:"
   echo "  git add .github/workflows/"
   echo "  git commit -m 'ci: add agent CI workflows'"
   echo "  git push"
   echo ""
   echo "설치 검증:"
-  echo "  bash <(gh api repos/$CI_REPO/contents/verify.sh --jq '.content' | base64 -d)"
+  echo "  curl -sL https://raw.githubusercontent.com/$CI_REPO/main/verify.sh | bash"
+  echo ""
+  echo "파이프라인 테스트:"
+  local first_agent
+  first_agent=$(echo "$AVAILABLE_AGENTS" | awk '{print $1}')
+  echo "  gh issue create --title \"${first_agent}-auto 첫 번째 개선\" --body \"현재 코드에서 가장 가치 있는 개선 하나를 골라 수정해 주세요.\""
 }
 
 main "$@"
