@@ -8,6 +8,16 @@ git config core.hooksPath .githooks
 
 이 hook은 커밋 시 `tests/test_*.sh`를 전부 실행한다. 테스트가 하나라도 실패하면 커밋이 차단된다.
 
+## 테스트
+
+```bash
+bash .githooks/pre-commit
+```
+
+전체 테스트를 실행한다. 개별 테스트는 `bash tests/test_xxx.sh`로 실행할 수 있다.
+
+테스트는 install.sh의 함수를 source해서 검증하는 방식이다. 외부 API 호출이 필요한 경우 mock 함수로 대체한다 (`tests/test_install_secret.sh` 참고).
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill
