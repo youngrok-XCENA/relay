@@ -132,7 +132,7 @@ generate_claude() {
   local desc="$1" style="$2" exts="$3" build="$4" test_cmd="$5" base="$6"
   version_stamp
   cat <<EOF
-name: Claude CI
+name: Relay Claude
 on:
   issues:
     types: [opened, reopened, closed, labeled]
@@ -236,7 +236,7 @@ generate_codex() {
   local desc="$1" style="$2" exts="$3" build="$4" test_cmd="$5" base="$6"
   version_stamp
   cat <<EOF
-name: Codex
+name: Relay Codex
 on:
   issues:
     types: [opened, reopened, closed, labeled]
@@ -346,7 +346,7 @@ generate_schedule() {
   cat <<SEOF
 # 스케줄 CI (${agent}) — 주석을 해제하고 프로젝트에 맞게 수정하세요.
 #
-# name: Scheduled CI (${agent})
+# name: Relay ${agent^} Schedule
 # on:
 #   schedule:
 #     - cron: '0 18 * * *'   # UTC 18:00 = KST 03:00

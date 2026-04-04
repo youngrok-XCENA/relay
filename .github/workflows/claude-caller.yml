@@ -1,4 +1,4 @@
-name: Claude CI
+name: Relay Claude Caller
 on:
   issues:
     types: [opened, reopened, closed, labeled]

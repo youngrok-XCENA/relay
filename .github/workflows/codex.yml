@@ -1,4 +1,4 @@
-name: Codex
+name: Relay Codex
 
 on:
   workflow_call:

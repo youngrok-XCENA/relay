@@ -1,4 +1,4 @@
-name: Claude
+name: Relay Claude
 
 on:
   workflow_call:
