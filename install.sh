@@ -474,8 +474,8 @@ install_secret() {
   local repo="$1"
 
   if gh secret list -R "$repo" 2>/dev/null | grep -q '^GH_PAT'; then
-    ok "GH_PAT secret 이미 설정됨"
-    return
+    gh secret delete GH_PAT -R "$repo" 2>/dev/null
+    ok "기존 GH_PAT secret 삭제"
   fi
 
   local clean_pat
