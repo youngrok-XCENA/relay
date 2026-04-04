@@ -413,9 +413,6 @@ jobs:
           ### Why
           Explain why this change is needed. What problem exists if this is not applied?
 
-          ### What changed
-          Describe what was changed concisely.
-
           ### Design changes (optional)
           If there are structural changes (e.g. call flow, module boundaries, data flow), include a mermaid diagram. Skip this section if the change is simple (config, typo, single-function edit)."
 
@@ -816,9 +813,6 @@ jobs:
           ### Why
           Explain why this change is needed. What problem exists if this is not applied?
 
-          ### What changed
-          Describe what was changed concisely.
-
           ### Design changes (optional)
           If there are structural changes (e.g. call flow, module boundaries, data flow), include a mermaid diagram. Skip this section if the change is simple (config, typo, single-function edit)."
 
@@ -1092,12 +1086,18 @@ jobs:
 
       - name: Post PR fix comment
         if: steps.prfix_push.outputs.has_changes == 'true'
-        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
-        with:
-          body: ${{ steps.prfix.outputs.result }}
-          target: ${{ steps.pr.outputs.number }}
-          type: pr
-          repository: ${{ github.repository }}
+        shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          PRFIX_RESULT: ${{ steps.prfix.outputs.result }}
+        run: |
+          CLEAN=$(echo "$PRFIX_RESULT" | sed -n '/^#/,$p')
+          if [ -z "$CLEAN" ]; then
+            CLEAN="$PRFIX_RESULT"
+          fi
+          gh pr comment "$PR_NUMBER" \
+            --repo "${{ github.repository }}" \
+            --body "$CLEAN"
 
       - name: Normalize checks fix attempts
         if: steps.push.outputs.has_changes == 'true' && steps.pr.outputs.number != ''
