@@ -401,18 +401,27 @@ jobs:
           - If you add new functionality, write tests for it.
           - Do not modify files outside the scope of this issue.
           - Do not post issue comments, create PRs, or use GitHub tools for side effects.
-          - Do not describe tool/auth limitations in the final response.
-          - Do not include meta-commentary about your own process."
+          - Do not describe tool/auth limitations in the final response."
 
           if [ -n "$TMPL" ]; then
             PROMPT="${PROMPT}
-          - Return ONLY the work summary formatted as a PR body that follows the PR template below. Fill in each section of the template with relevant content from your fix. Remove HTML comments. Leave optional sections empty (with just a dash) if not applicable.
+
+          ## CRITICAL: Output Format
+          Your response will be used directly as the PR body. You MUST:
+          1. Output NOTHING before the first section header of the template.
+          2. Follow the PR template structure below EXACTLY — keep every section header, fill in content, and replace HTML comments with actual content.
+          3. Leave optional sections with just a dash (-) if not applicable.
+          4. Do NOT add any preamble, status messages, or commentary outside the template sections.
 
           ## PR Template
           ${TMPL}"
           else
             PROMPT="${PROMPT}
-          - Return ONLY the work summary in the following format, with no preamble:
+
+          ## CRITICAL: Output Format
+          Your response will be used directly as the PR body. You MUST:
+          1. Output NOTHING before the first section header. No preamble, no status messages.
+          2. Follow this format EXACTLY:
 
           ### Why
           Explain why this change is needed. What problem exists if this is not applied?
@@ -795,18 +804,27 @@ jobs:
           - If you add new functionality, write tests for it.
           - Do not modify files outside the scope of this issue.
           - Do not post issue comments, create PRs, or use GitHub tools for side effects.
-          - Do not describe tool/auth limitations in the final response.
-          - Do not include meta-commentary about your own process."
+          - Do not describe tool/auth limitations in the final response."
 
           if [ -n "$TMPL" ]; then
             PROMPT="${PROMPT}
-          - Return ONLY the work summary formatted as a PR body that follows the PR template below. Fill in each section of the template with relevant content from your fix. Remove HTML comments. Leave optional sections empty (with just a dash) if not applicable.
+
+          ## CRITICAL: Output Format
+          Your response will be used directly as the PR body. You MUST:
+          1. Output NOTHING before the first section header of the template.
+          2. Follow the PR template structure below EXACTLY — keep every section header, fill in content, and replace HTML comments with actual content.
+          3. Leave optional sections with just a dash (-) if not applicable.
+          4. Do NOT add any preamble, status messages, or commentary outside the template sections.
 
           ## PR Template
           ${TMPL}"
           else
             PROMPT="${PROMPT}
-          - Return ONLY the work summary in the following format, with no preamble:
+
+          ## CRITICAL: Output Format
+          Your response will be used directly as the PR body. You MUST:
+          1. Output NOTHING before the first section header. No preamble, no status messages.
+          2. Follow this format EXACTLY:
 
           ### Why
           Explain why this change is needed. What problem exists if this is not applied?
