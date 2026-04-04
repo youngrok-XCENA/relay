@@ -349,12 +349,24 @@ jobs:
           TEST_COMMAND: ${{ inputs.test_command }}
           FORMAT_COMMAND: ${{ inputs.format_command }}
           CODE_STYLE_GUIDE: ${{ inputs.code_style_guide }}
+          PR_TEMPLATE: ${{ inputs.pr_template }}
         run: |
           COMMENTS=$(gh api "repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments" \
             --paginate \
             --jq '[.[] | select(.body | startswith("### Codex")) | .body] | join("\n\n---\n\n")' 2>/dev/null || echo "")
 
           USER_PROMPT=$(echo "$COMMENT_BODY" | sed 's|/codex-fix||' | xargs)
+
+          # Read PR template from the repository if not provided via input
+          TMPL="$PR_TEMPLATE"
+          if [ -z "$TMPL" ]; then
+            for f in .github/pull_request_template.md .github/PULL_REQUEST_TEMPLATE.md; do
+              if [ -f "$f" ]; then
+                TMPL=$(cat "$f")
+                break
+              fi
+            done
+          fi
 
           PROMPT="You are fixing a GitHub issue for the ${PROJECT_DESCRIPTION} project.
 
@@ -390,7 +402,16 @@ jobs:
           - Do not modify files outside the scope of this issue.
           - Do not post issue comments, create PRs, or use GitHub tools for side effects.
           - Do not describe tool/auth limitations in the final response.
-          - Do not include meta-commentary about your own process.
+          - Do not include meta-commentary about your own process."
+
+          if [ -n "$TMPL" ]; then
+            PROMPT="${PROMPT}
+          - Return ONLY the work summary formatted as a PR body that follows the PR template below. Fill in each section of the template with relevant content from your fix. Remove HTML comments. Leave optional sections empty (with just a dash) if not applicable.
+
+          ## PR Template
+          ${TMPL}"
+          else
+            PROMPT="${PROMPT}
           - Return ONLY the work summary in the following format, with no preamble:
 
           ### Why
@@ -401,6 +422,7 @@ jobs:
 
           ### Design changes (optional)
           If there are structural changes (e.g. call flow, module boundaries, data flow), include a mermaid diagram. Skip this section if the change is simple (config, typo, single-function edit)."
+          fi
 
           {
             echo "prompt<<GHEOF"
@@ -468,7 +490,6 @@ jobs:
           BRANCH_NAME: ${{ steps.branch.outputs.name }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           BASE_BRANCH: ${{ inputs.base_branch }}
-          PR_TEMPLATE: ${{ inputs.pr_template }}
         run: |
           EXISTING_PR=$(gh pr list --repo "${{ github.repository }}" --head "${BRANCH_NAME}" --json url --jq '.[0].url // empty')
           if [ -n "$EXISTING_PR" ]; then
@@ -480,11 +501,6 @@ jobs:
           {
             echo "${RESULT}" | head -c 60000
             echo ""
-            echo "---"
-            echo ""
-            if [ -n "$PR_TEMPLATE" ]; then
-              printf "%s" "$PR_TEMPLATE"
-            fi
             echo ""
             echo "Closes #${ISSUE_NUMBER}"
           } > "$PR_BODY_FILE"
@@ -692,9 +708,10 @@ jobs:
             - **Risks**: Any potential side effects?
 
             ## Rules
+            - This is a READ-ONLY analysis step. Do NOT modify, edit, or write any files. Do NOT run fix commands. Only read and analyze.
             - Be concise and specific.
-            - Do not include meta-commentary about your own process.
-            - Start directly with the analysis content.
+            - Do not include meta-commentary about your own process (e.g. "Let me compile the analysis").
+            - Start directly with the analysis content (Type, Scope, Action Plan, Risks).
             - Do not post issue comments, create PRs, or use GitHub tools for side effects.
             - Do not describe tool/auth limitations in the final response.
             - Return only the analysis body text.
@@ -730,10 +747,22 @@ jobs:
           FORMAT_COMMAND: ${{ inputs.format_command }}
           CODE_STYLE_GUIDE: ${{ inputs.code_style_guide }}
           ANALYSIS_RESULT: ${{ steps.analysis.outputs.result }}
+          PR_TEMPLATE: ${{ inputs.pr_template }}
         run: |
           COMMENTS=$(gh api "repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments" \
             --paginate \
             --jq '[.[] | select(.body | startswith("### Codex")) | .body] | join("\n\n---\n\n")' 2>/dev/null || echo "")
+
+          # Read PR template from the repository if not provided via input
+          TMPL="$PR_TEMPLATE"
+          if [ -z "$TMPL" ]; then
+            for f in .github/pull_request_template.md .github/PULL_REQUEST_TEMPLATE.md; do
+              if [ -f "$f" ]; then
+                TMPL=$(cat "$f")
+                break
+              fi
+            done
+          fi
 
           PROMPT="You are fixing a GitHub issue for the ${PROJECT_DESCRIPTION} project.
 
@@ -767,7 +796,16 @@ jobs:
           - Do not modify files outside the scope of this issue.
           - Do not post issue comments, create PRs, or use GitHub tools for side effects.
           - Do not describe tool/auth limitations in the final response.
-          - Do not include meta-commentary about your own process.
+          - Do not include meta-commentary about your own process."
+
+          if [ -n "$TMPL" ]; then
+            PROMPT="${PROMPT}
+          - Return ONLY the work summary formatted as a PR body that follows the PR template below. Fill in each section of the template with relevant content from your fix. Remove HTML comments. Leave optional sections empty (with just a dash) if not applicable.
+
+          ## PR Template
+          ${TMPL}"
+          else
+            PROMPT="${PROMPT}
           - Return ONLY the work summary in the following format, with no preamble:
 
           ### Why
@@ -778,6 +816,7 @@ jobs:
 
           ### Design changes (optional)
           If there are structural changes (e.g. call flow, module boundaries, data flow), include a mermaid diagram. Skip this section if the change is simple (config, typo, single-function edit)."
+          fi
 
           {
             echo "prompt<<GHEOF"
@@ -845,7 +884,6 @@ jobs:
           BRANCH_NAME: ${{ steps.branch.outputs.name }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           BASE_BRANCH: ${{ inputs.base_branch }}
-          PR_TEMPLATE: ${{ inputs.pr_template }}
         run: |
           EXISTING=$(gh pr list --repo "${{ github.repository }}" --head "${BRANCH_NAME}" --json url,number --jq '.[0] // empty')
           if [ -n "$EXISTING" ]; then
@@ -858,11 +896,6 @@ jobs:
           {
             echo "${RESULT}" | head -c 60000
             echo ""
-            echo "---"
-            echo ""
-            if [ -n "$PR_TEMPLATE" ]; then
-              printf "%s" "$PR_TEMPLATE"
-            fi
             echo ""
             echo "Closes #${ISSUE_NUMBER}"
           } > "$PR_BODY_FILE"
@@ -1917,13 +1950,14 @@ jobs:
             FULL_PROMPT="${FULL_PROMPT}
 
           ## Instructions
+          - This is a READ-ONLY analysis step. Do NOT modify, edit, or write any files. Do NOT run fix commands. Only read and analyze.
           - Determine whether this issue is a bug report, an improvement request, or a general task.
           - Identify which code modules and files are relevant.
           - Assess the impact and scope.
           - Suggest a concrete action plan (fix, refactor, or new implementation).
           - If the issue lacks information, list what additional details are needed.
           - Be concise and actionable.
-          - Do not include meta-commentary about your own process.
+          - Do not include meta-commentary about your own process (e.g. "Let me compile the analysis").
           - Start directly with the analysis content.
           - Reference specific file paths and function names from the codebase.
           - Return only the analysis body text.
