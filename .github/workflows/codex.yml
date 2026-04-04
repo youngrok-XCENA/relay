@@ -506,9 +506,15 @@ jobs:
             exit 0
           fi
 
+          # Strip any preamble text before the first markdown heading
+          CLEAN_RESULT=$(echo "${RESULT}" | sed -n '/^#/,$p' | head -c 60000)
+          if [ -z "$CLEAN_RESULT" ]; then
+            CLEAN_RESULT=$(echo "${RESULT}" | head -c 60000)
+          fi
+
           PR_BODY_FILE=$(mktemp)
           {
-            echo "${RESULT}" | head -c 60000
+            echo "$CLEAN_RESULT"
             echo ""
             echo ""
             echo "Closes #${ISSUE_NUMBER}"
@@ -910,9 +916,15 @@ jobs:
             exit 0
           fi
 
+          # Strip any preamble text before the first markdown heading
+          CLEAN_RESULT=$(echo "${RESULT}" | sed -n '/^#/,$p' | head -c 60000)
+          if [ -z "$CLEAN_RESULT" ]; then
+            CLEAN_RESULT=$(echo "${RESULT}" | head -c 60000)
+          fi
+
           PR_BODY_FILE=$(mktemp)
           {
-            echo "${RESULT}" | head -c 60000
+            echo "$CLEAN_RESULT"
             echo ""
             echo ""
             echo "Closes #${ISSUE_NUMBER}"
