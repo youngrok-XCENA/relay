@@ -38,6 +38,7 @@ source "$TMP_INSTALL"
 
 git -C "$TMP_DIR" init -q
 git -C "$TMP_DIR" remote add origin git@github.com:youngrok-XCENA/local-test.git
+AVAILABLE_AGENTS="claude codex"
 mkdir -p "$TMP_DIR/.github/workflows"
 touch "$TMP_DIR/.github/workflows/yr-claude.yml"
 touch "$TMP_DIR/.github/workflows/code-style-caller.yml"

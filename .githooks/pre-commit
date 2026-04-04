@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+FAILED=0
+
+for t in "$REPO_ROOT"/tests/test_*.sh; do
+  [ -f "$t" ] || continue
+  name="$(basename "$t")"
+  if output="$(bash "$t" 2>&1)"; then
+    printf '  ✓ %s\n' "$name"
+  else
+    printf '  ✗ %s\n' "$name" >&2
+    printf '    %s\n' "$output" >&2
+    FAILED=1
+  fi
+done
+
+if [ "$FAILED" -eq 1 ]; then
+  echo "" >&2
+  echo "테스트 실패 — 커밋이 중단되었습니다." >&2
+  echo "테스트를 건너뛰려면: git commit --no-verify" >&2
+  exit 1
+fi
