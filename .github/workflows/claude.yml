@@ -1207,6 +1207,13 @@ jobs:
     steps:
 
       # ── Stage 0: Start ──────────────────────────────────────────────
+      - name: React with eyes
+        uses: youngrok-XCENA/relay/.github/actions/react-emoji@main
+        with:
+          url: ${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}
+          reaction: eyes
+          token: ${{ secrets.GH_PAT || github.token }}
+
       - name: Post start comment
         run: |
           BODY="### Claude Auto Pipeline
