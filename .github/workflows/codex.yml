@@ -403,25 +403,12 @@ jobs:
           - Do not post issue comments, create PRs, or use GitHub tools for side effects.
           - Do not describe tool/auth limitations in the final response."
 
-          if [ -n "$TMPL" ]; then
-            PROMPT="${PROMPT}
-
-          ## CRITICAL: Output Format
-          Your response will be used directly as the PR body. You MUST:
-          1. Output NOTHING before the first section header of the template.
-          2. Follow the PR template structure below EXACTLY — keep every section header, fill in content, and replace HTML comments with actual content.
-          3. Leave optional sections with just a dash (-) if not applicable.
-          4. Do NOT add any preamble, status messages, or commentary outside the template sections.
-
-          ## PR Template
-          ${TMPL}"
-          else
-            PROMPT="${PROMPT}
+          PROMPT="${PROMPT}
 
           ## CRITICAL: Output Format
           Your response will be used directly as the PR body. You MUST:
           1. Output NOTHING before the first section header. No preamble, no status messages.
-          2. Follow this format EXACTLY:
+          2. Start with these sections in this exact order:
 
           ### Why
           Explain why this change is needed. What problem exists if this is not applied?
@@ -431,6 +418,13 @@ jobs:
 
           ### Design changes (optional)
           If there are structural changes (e.g. call flow, module boundaries, data flow), include a mermaid diagram. Skip this section if the change is simple (config, typo, single-function edit)."
+
+          if [ -n "$TMPL" ]; then
+            PROMPT="${PROMPT}
+
+          3. After the above sections, fill in the following PR template. Keep every section header, replace HTML comments with actual content. Leave optional sections with just a dash (-) if not applicable.
+
+          ${TMPL}"
           fi
 
           {
@@ -812,25 +806,12 @@ jobs:
           - Do not post issue comments, create PRs, or use GitHub tools for side effects.
           - Do not describe tool/auth limitations in the final response."
 
-          if [ -n "$TMPL" ]; then
-            PROMPT="${PROMPT}
-
-          ## CRITICAL: Output Format
-          Your response will be used directly as the PR body. You MUST:
-          1. Output NOTHING before the first section header of the template.
-          2. Follow the PR template structure below EXACTLY — keep every section header, fill in content, and replace HTML comments with actual content.
-          3. Leave optional sections with just a dash (-) if not applicable.
-          4. Do NOT add any preamble, status messages, or commentary outside the template sections.
-
-          ## PR Template
-          ${TMPL}"
-          else
-            PROMPT="${PROMPT}
+          PROMPT="${PROMPT}
 
           ## CRITICAL: Output Format
           Your response will be used directly as the PR body. You MUST:
           1. Output NOTHING before the first section header. No preamble, no status messages.
-          2. Follow this format EXACTLY:
+          2. Start with these sections in this exact order:
 
           ### Why
           Explain why this change is needed. What problem exists if this is not applied?
@@ -840,6 +821,13 @@ jobs:
 
           ### Design changes (optional)
           If there are structural changes (e.g. call flow, module boundaries, data flow), include a mermaid diagram. Skip this section if the change is simple (config, typo, single-function edit)."
+
+          if [ -n "$TMPL" ]; then
+            PROMPT="${PROMPT}
+
+          3. After the above sections, fill in the following PR template. Keep every section header, replace HTML comments with actual content. Leave optional sections with just a dash (-) if not applicable.
+
+          ${TMPL}"
           fi
 
           {
