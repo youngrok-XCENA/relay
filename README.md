@@ -13,6 +13,16 @@
 
 > 팀 repo에 바로 설치하기 전에, **개인 fork에 먼저 설치해서 테스트**하는 것을 권장한다.
 
+### 0. 개발 환경 설정 (relay 기여자용)
+
+relay repo를 clone한 뒤 pre-commit hook을 활성화한다. 커밋 시 테스트가 자동 실행되어 깨진 코드가 main에 들어가는 것을 방지한다.
+
+```bash
+git clone https://github.com/youngrok-XCENA/relay.git
+cd relay
+git config core.hooksPath .githooks
+```
+
 ### 1. Prerequisites
 
 - [GitHub CLI](https://cli.github.com/) (`gh`) 설치 및 로그인

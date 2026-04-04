@@ -1,3 +1,13 @@
+## 개발 환경 설정
+
+clone 후 반드시 pre-commit hook을 활성화한다.
+
+```bash
+git config core.hooksPath .githooks
+```
+
+이 hook은 커밋 시 `tests/test_*.sh`를 전부 실행한다. 테스트가 하나라도 실패하면 커밋이 차단된다.
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill
