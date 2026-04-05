@@ -1,0 +1,42 @@
+name: Pipeline Label
+description: Update pipeline stage label on an issue. Removes previous pipeline:* labels and adds the new one.
+
+inputs:
+  stage:
+    description: "Pipeline stage: analyzing, fixing, creating-pr, reviewing, patching, checking, complete, failed, needs-human"
+    required: true
+  issue_number:
+    required: true
+  repository:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - id: update
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        STAGE: ${{ inputs.stage }}
+        ISSUE: ${{ inputs.issue_number }}
+        REPO: ${{ inputs.repository }}
+      run: |
+        LABEL="pipeline:${STAGE}"
+
+        # Ensure the label exists (create if missing)
+        gh label create "$LABEL" --repo "$REPO" \
+          --description "Auto-pipeline stage" \
+          --color "1D76DB" 2>/dev/null || true
+
+        # Remove any existing pipeline:* labels
+        CURRENT=$(gh api "repos/${REPO}/issues/${ISSUE}/labels" \
+          --jq '.[].name' 2>/dev/null || true)
+        for lbl in $CURRENT; do
+          if [[ "$lbl" == pipeline:* ]]; then
+            gh api -X DELETE "repos/${REPO}/issues/${ISSUE}/labels/${lbl}" 2>/dev/null || true
+          fi
+        done
+
+        # Add the new label
+        gh issue edit "$ISSUE" --repo "$REPO" --add-label "$LABEL" 2>/dev/null || true
+        echo "::notice::Pipeline label updated to ${LABEL}"

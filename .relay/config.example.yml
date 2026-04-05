@@ -1,0 +1,28 @@
+# Relay Quality Gates Configuration
+# Copy this file to .relay/config.yml in your target repository.
+
+quality_gates:
+  # Require all PR checks (CI) to pass before marking pipeline as complete
+  require_checks_pass: true
+
+  # Maximum allowed CRITICAL or HIGH issues from AI review
+  # Set to 0 to require all critical/high issues to be resolved
+  max_critical_issues: 0
+
+  # File patterns that always require human approval (glob patterns)
+  # Changes touching these paths will get 'pipeline:needs-human' label
+  require_human_approval: []
+  #  - "*.yml"           # CI/CD config changes
+  #  - "security/**"     # Security-sensitive code
+  #  - "Dockerfile"      # Container changes
+  #  - ".env*"           # Environment configuration
+
+pipeline:
+  # Maximum fix attempts for failing CI checks (1-3)
+  max_check_fix_attempts: 3
+
+  # Maximum review-fix rounds (1-3)
+  max_review_rounds: 1
+
+  # Timeout in minutes for the entire pipeline
+  timeout_minutes: 60

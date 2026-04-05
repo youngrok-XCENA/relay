@@ -1220,6 +1220,13 @@ jobs:
           reaction: eyes
           token: ${{ secrets.GH_PAT || github.token }}
 
+      - name: Label pipeline analyzing
+        uses: youngrok-XCENA/relay/.github/actions/pipeline-label@main
+        with:
+          stage: analyzing
+          issue_number: ${{ github.event.issue.number }}
+          repository: ${{ github.repository }}
+
       - name: Post start comment
         run: |
           BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Auto Pipeline
@@ -1244,6 +1251,14 @@ jobs:
             --body "$BODY"
 
       # ── Stage 1: Fix ─────────────────────────────────────────────────
+      - name: Label pipeline fixing
+        if: steps.analysis.outputs.exit_code == '0'
+        uses: youngrok-XCENA/relay/.github/actions/pipeline-label@main
+        with:
+          stage: fixing
+          issue_number: ${{ github.event.issue.number }}
+          repository: ${{ github.repository }}
+
       - name: Checkout base branch
         uses: actions/checkout@v4
         with:
@@ -1265,6 +1280,44 @@ jobs:
       - name: Initialize submodules
         shell: bash
         run: git submodule update --init --recursive || { echo "::error::Submodule initialization failed"; exit 1; }
+
+      - name: Load relay config
+        id: config
+        shell: bash
+        run: |
+          CONFIG_FILE=".relay/config.yml"
+          if [ -f "$CONFIG_FILE" ]; then
+            echo "::notice::Found $CONFIG_FILE"
+            # Parse quality gate settings
+            MAX_CRITICAL=$(python3 -c "
+          import yaml
+          with open('$CONFIG_FILE') as f:
+              c = yaml.safe_load(f) or {}
+          qg = c.get('quality_gates', {})
+          print(qg.get('max_critical_issues', 0))
+          " 2>/dev/null || echo "0")
+
+            HUMAN_PATTERNS=$(python3 -c "
+          import yaml, json
+          with open('$CONFIG_FILE') as f:
+              c = yaml.safe_load(f) or {}
+          qg = c.get('quality_gates', {})
+          patterns = qg.get('require_human_approval', [])
+          print(json.dumps(patterns))
+          " 2>/dev/null || echo "[]")
+
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "max_critical_issues=${MAX_CRITICAL}" >> "$GITHUB_OUTPUT"
+            {
+              echo "human_approval_patterns<<GHEOF"
+              echo "$HUMAN_PATTERNS"
+              echo "GHEOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "max_critical_issues=0" >> "$GITHUB_OUTPUT"
+            echo "human_approval_patterns=[]" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Analyze issue
         id: analysis
@@ -1429,6 +1482,14 @@ jobs:
           push_branch: ${{ steps.branch.outputs.name }}
 
       # ── Stage 2: Create PR ───────────────────────────────────────────
+      - name: Label pipeline creating-pr
+        if: steps.push.outputs.has_changes == 'true'
+        uses: youngrok-XCENA/relay/.github/actions/pipeline-label@main
+        with:
+          stage: creating-pr
+          issue_number: ${{ github.event.issue.number }}
+          repository: ${{ github.repository }}
+
       - name: Create PR
         if: steps.fix.outputs.exit_code == '0' && steps.push.outputs.has_changes == 'true'
         id: pr
@@ -1480,9 +1541,73 @@ jobs:
           echo "url=${PR_URL}" >> "$GITHUB_OUTPUT"
           echo "number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
 
+      # ── Quality Gate: Human approval check ──────────────────────────
+      - name: Check human approval required
+        if: steps.push.outputs.has_changes == 'true' && steps.config.outputs.found == 'true'
+        id: human_gate
+        shell: bash
+        env:
+          PATTERNS_JSON: ${{ steps.config.outputs.human_approval_patterns }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          CHANGED_FILES=$(git diff --name-only "origin/${BASE_BRANCH}...HEAD")
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "needs_human=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          NEEDS_HUMAN=$(python3 -c "
+          import json, fnmatch, sys
+          patterns = json.loads('${PATTERNS_JSON}')
+          if not patterns:
+              print('false')
+              sys.exit()
+          files = '''${CHANGED_FILES}'''.strip().split('\n')
+          for f in files:
+              for p in patterns:
+                  if fnmatch.fnmatch(f, p):
+                      print('true')
+                      sys.exit()
+          print('false')
+          " 2>/dev/null || echo "false")
+
+          echo "needs_human=${NEEDS_HUMAN}" >> "$GITHUB_OUTPUT"
+
+      - name: Label needs-human if required
+        if: steps.human_gate.outputs.needs_human == 'true'
+        uses: youngrok-XCENA/relay/.github/actions/pipeline-label@main
+        with:
+          stage: needs-human
+          issue_number: ${{ github.event.issue.number }}
+          repository: ${{ github.repository }}
+
+      - name: Post human approval notice
+        if: steps.human_gate.outputs.needs_human == 'true'
+        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
+        with:
+          body: |
+            ### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Auto Pipeline
+
+            ⏸️ 이 PR은 `.relay/config.yml`의 `require_human_approval` 패턴에 매칭되는 파일을 수정했습니다.
+            사람의 검토가 필요합니다. 검토 후 `auto-fix` 라벨을 다시 달아주세요.
+
+            ---
+            > 🤖 *${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} CI · [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+          target: ${{ github.event.issue.number }}
+          type: issue
+          repository: ${{ github.repository }}
+
       # ── Stage 3: Review ──────────────────────────────────────────────
+      - name: Label pipeline reviewing
+        if: steps.push.outputs.has_changes == 'true' && steps.pr.outputs.number != '' && steps.human_gate.outputs.needs_human != 'true'
+        uses: youngrok-XCENA/relay/.github/actions/pipeline-label@main
+        with:
+          stage: reviewing
+          issue_number: ${{ github.event.issue.number }}
+          repository: ${{ github.repository }}
+
       - name: Get diff for review
-        if: steps.push.outputs.has_changes == 'true' && steps.pr.outputs.number != ''
+        if: steps.push.outputs.has_changes == 'true' && steps.pr.outputs.number != '' && steps.human_gate.outputs.needs_human != 'true'
         id: diff
         shell: bash
         env:
@@ -1499,7 +1624,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Run agent review
-        if: steps.push.outputs.has_changes == 'true' && steps.pr.outputs.number != ''
+        if: steps.push.outputs.has_changes == 'true' && steps.pr.outputs.number != '' && steps.human_gate.outputs.needs_human != 'true'
         id: review
         uses: youngrok-XCENA/relay/.github/actions/run-agent@main
         with:
@@ -1543,6 +1668,14 @@ jobs:
           repository: ${{ github.repository }}
 
       # ── Stage 4: PR Fix ──────────────────────────────────────────────
+      - name: Label pipeline patching
+        if: steps.review.outputs.exit_code == '0'
+        uses: youngrok-XCENA/relay/.github/actions/pipeline-label@main
+        with:
+          stage: patching
+          issue_number: ${{ github.event.issue.number }}
+          repository: ${{ github.repository }}
+
       - name: Check if fix needed
         if: steps.review.outputs.exit_code == '0'
         id: review_check
@@ -1672,6 +1805,14 @@ jobs:
             echo "$DIFF"
             echo "GHEOF"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Label pipeline checking
+        if: steps.push.outputs.has_changes == 'true' && steps.pr.outputs.number != ''
+        uses: youngrok-XCENA/relay/.github/actions/pipeline-label@main
+        with:
+          stage: checking
+          issue_number: ${{ github.event.issue.number }}
+          repository: ${{ github.repository }}
 
       - name: Wait for PR checks
         if: steps.push.outputs.has_changes == 'true' && steps.pr.outputs.number != ''
@@ -1973,6 +2114,14 @@ jobs:
           poll_interval_seconds: ${{ inputs.check_poll_interval_seconds }}
 
       # ── Final Status ─────────────────────────────────────────────────
+      - name: Label pipeline final state
+        if: always()
+        uses: youngrok-XCENA/relay/.github/actions/pipeline-label@main
+        with:
+          stage: ${{ (steps.fix.outputs.exit_code != '0' || steps.push.outputs.has_changes == 'false' || steps.pr.outputs.url == '') && 'failed' || 'complete' }}
+          issue_number: ${{ github.event.issue.number }}
+          repository: ${{ github.repository }}
+
       - name: Post final status
         if: always()
         shell: bash

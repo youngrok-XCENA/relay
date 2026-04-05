@@ -18,6 +18,7 @@ YAML_FILES=(
   ".github/actions/run-claude/action.yml"
   ".github/actions/run-codex/action.yml"
   ".github/actions/run-agent/action.yml"
+  ".github/actions/pipeline-label/action.yml"
   ".github/actions/collect-pr-checks/action.yml"
   ".github/actions/post-comment/action.yml"
   ".github/actions/react-emoji/action.yml"
