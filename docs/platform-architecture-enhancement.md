@@ -260,16 +260,16 @@ pipeline:
 
 ---
 
-## 구현 우선순위
+## 구현 상태
 
 ```
-Phase 1 (Agent Abstraction)     ← 가장 높은 ROI. 중복 50% 제거.
+Phase 1 (Agent Abstraction)     ✅ 완료 — relay.yml + run-agent 통합
   ↓
-Phase 2 (Modularization)        ← Phase 1 위에서 자연스럽게 진행.
+Phase 2 (Modularization)        ✅ 완료 — format-and-commit 액션 추출
   ↓
-Phase 3 (State Management)      ← 운영 가시성 확보.
+Phase 3 (State Management)      ✅ 완료 — pipeline-label 기반 상태 추적
   ↓
-Phase 4 (Quality Gates)         ← 팀 거버넌스 완성.
+Phase 4 (Quality Gates)         ✅ 완료 — .relay/config.yml + human approval gate
 ```
 
 ### Phase 1 예상 작업량
