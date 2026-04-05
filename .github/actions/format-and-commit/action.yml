@@ -1,0 +1,84 @@
+name: Format and Commit
+description: Format changed files, commit, and push. Returns whether new commits were made.
+
+inputs:
+  format_command:
+    required: false
+    default: ""
+  base_ref:
+    description: "Branch or ref to diff against (e.g. origin/main or initial SHA)"
+    required: true
+  diff_mode:
+    description: "'branch' to diff against base branch, 'sha' to diff against a specific commit SHA"
+    required: false
+    default: "branch"
+  bot_user:
+    required: true
+  bot_email:
+    required: true
+  commit_message:
+    required: true
+  push_branch:
+    required: true
+
+outputs:
+  has_changes:
+    value: ${{ steps.push.outputs.has_changes }}
+
+runs:
+  using: composite
+  steps:
+    - name: Format changed files
+      if: inputs.format_command != ''
+      shell: bash
+      env:
+        FORMAT_COMMAND: ${{ inputs.format_command }}
+        BASE_REF: ${{ inputs.base_ref }}
+        DIFF_MODE: ${{ inputs.diff_mode }}
+      run: |
+        if [ "$DIFF_MODE" = "sha" ]; then
+          mapfile -t changed_files < <(git diff --name-only "${BASE_REF}..HEAD")
+        else
+          mapfile -t changed_files < <(git diff --name-only "${BASE_REF}...HEAD")
+        fi
+        if [ ${#changed_files[@]} -eq 0 ]; then
+          exit 0
+        fi
+        read -r -a formatter <<< "$FORMAT_COMMAND"
+        "${formatter[@]}" "${changed_files[@]}"
+
+    - name: Commit and push
+      id: push
+      shell: bash
+      env:
+        BOT_USER: ${{ inputs.bot_user }}
+        BOT_EMAIL: ${{ inputs.bot_email }}
+        COMMIT_MSG: ${{ inputs.commit_message }}
+        PUSH_BRANCH: ${{ inputs.push_branch }}
+        BASE_REF: ${{ inputs.base_ref }}
+        DIFF_MODE: ${{ inputs.diff_mode }}
+      run: |
+        git config user.name "$BOT_USER"
+        git config user.email "$BOT_EMAIL"
+
+        git add -A
+        if [ -n "$(git diff --cached --name-only)" ]; then
+          git commit -m "$COMMIT_MSG"
+        fi
+
+        if [ "$DIFF_MODE" = "sha" ]; then
+          if [ "$(git rev-parse HEAD)" = "$BASE_REF" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        else
+          if [ -z "$(git log "${BASE_REF}"..HEAD --oneline)" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        fi
+
+        echo "has_changes=true" >> "$GITHUB_OUTPUT"
+        if [ -n "$(git log "origin/${PUSH_BRANCH}"..HEAD --oneline 2>/dev/null)" ]; then
+          git push origin "$PUSH_BRANCH" 2>&1
+        fi

@@ -465,45 +465,17 @@ jobs:
           model: ${{ inputs.model }}
           max_turns: ${{ inputs.max_turns }}
 
-      - name: Format changed files
-        if: steps.agent_run.outputs.exit_code == '0' && inputs.format_command != ''
-        shell: bash
-        env:
-          FORMAT_COMMAND: ${{ inputs.format_command }}
-          BASE_BRANCH: ${{ inputs.base_branch }}
-        run: |
-          mapfile -t changed_files < <(git diff --name-only "${BASE_BRANCH}...HEAD")
-          if [ ${#changed_files[@]} -eq 0 ]; then
-            exit 0
-          fi
-
-          read -r -a formatter <<< "$FORMAT_COMMAND"
-          "${formatter[@]}" "${changed_files[@]}"
-
-      - name: Commit and push changes
+      - name: Format and commit changes
         if: steps.agent_run.outputs.exit_code == '0'
         id: push
-        shell: bash
-        env:
-          BOT_USER: ${{ inputs.bot_user }}
-          BOT_EMAIL: ${{ inputs.bot_email }}
-          BASE_BRANCH: ${{ inputs.base_branch }}
-        run: |
-          git config user.name "$BOT_USER"
-          git config user.email "$BOT_EMAIL"
-
-          git add -A
-          if [ -n "$(git diff --cached --name-only)" ]; then
-            git commit -m "fix: address issue #${{ github.event.issue.number }}"
-          fi
-
-          if [ -z "$(git log "${BASE_BRANCH}"..HEAD --oneline)" ]; then
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          git push origin "${{ steps.branch.outputs.name }}" 2>&1
+        uses: youngrok-XCENA/relay/.github/actions/format-and-commit@main
+        with:
+          format_command: ${{ inputs.format_command }}
+          base_ref: ${{ inputs.base_branch }}
+          bot_user: ${{ inputs.bot_user }}
+          bot_email: ${{ inputs.bot_email }}
+          commit_message: "fix: address issue #${{ github.event.issue.number }}"
+          push_branch: ${{ steps.branch.outputs.name }}
 
       - name: Create PR
         if: steps.agent_run.outputs.exit_code == '0' && steps.push.outputs.has_changes == 'true'
@@ -821,50 +793,18 @@ jobs:
           model: ${{ inputs.model }}
           max_turns: ${{ inputs.max_prfix_turns }}
 
-      - name: Format changed files
-        if: steps.agent_run.outputs.exit_code == '0' && inputs.format_command != ''
-        shell: bash
-        env:
-          FORMAT_COMMAND: ${{ inputs.format_command }}
-          BASE_REF: ${{ needs.parse-pr-fix.outputs.base_ref }}
-        run: |
-          mapfile -t changed_files < <(git diff --name-only "origin/${BASE_REF}...HEAD")
-          if [ ${#changed_files[@]} -eq 0 ]; then
-            exit 0
-          fi
-
-          read -r -a formatter <<< "$FORMAT_COMMAND"
-          "${formatter[@]}" "${changed_files[@]}"
-
-      - name: Commit and push
+      - name: Format and commit PR fix
         if: steps.agent_run.outputs.exit_code == '0'
         id: push
-        shell: bash
-        env:
-          BOT_USER: ${{ inputs.bot_user }}
-          BOT_EMAIL: ${{ inputs.bot_email }}
-          HEAD_REF: ${{ needs.parse-pr-fix.outputs.head_ref }}
-          PR_NUMBER: ${{ needs.parse-pr-fix.outputs.pr_number }}
-          INITIAL_SHA: ${{ steps.initial_head.outputs.sha }}
-          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
-        run: |
-          git config user.name "$BOT_USER"
-          git config user.email "$BOT_EMAIL"
-
-          git add -A
-          if [ -n "$(git diff --cached --name-only)" ]; then
-            git commit -m "fix: address review feedback on PR #${PR_NUMBER}"
-          fi
-
-          if [ "$(git rev-parse HEAD)" = "$INITIAL_SHA" ]; then
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          if [ -n "$(git log "origin/${HEAD_REF}"..HEAD --oneline 2>/dev/null)" ]; then
-            git push origin "$HEAD_REF" 2>&1
-          fi
+        uses: youngrok-XCENA/relay/.github/actions/format-and-commit@main
+        with:
+          format_command: ${{ inputs.format_command }}
+          base_ref: ${{ steps.initial_head.outputs.sha }}
+          diff_mode: sha
+          bot_user: ${{ inputs.bot_user }}
+          bot_email: ${{ inputs.bot_email }}
+          commit_message: "fix: address review feedback on PR #${{ needs.parse-pr-fix.outputs.pr_number }}"
+          push_branch: ${{ needs.parse-pr-fix.outputs.head_ref }}
 
       - name: Build result comment
         if: always()
@@ -1476,45 +1416,17 @@ jobs:
           model: ${{ inputs.model }}
           max_turns: ${{ inputs.max_turns }}
 
-      - name: Format changed files
-        if: steps.fix.outputs.exit_code == '0' && inputs.format_command != ''
-        shell: bash
-        env:
-          FORMAT_COMMAND: ${{ inputs.format_command }}
-          BASE_BRANCH: ${{ inputs.base_branch }}
-        run: |
-          mapfile -t changed_files < <(git diff --name-only "${BASE_BRANCH}...HEAD")
-          if [ ${#changed_files[@]} -eq 0 ]; then
-            exit 0
-          fi
-
-          read -r -a formatter <<< "$FORMAT_COMMAND"
-          "${formatter[@]}" "${changed_files[@]}"
-
-      - name: Commit and push
+      - name: Format and commit fix
         if: steps.fix.outputs.exit_code == '0'
         id: push
-        shell: bash
-        env:
-          BOT_USER: ${{ inputs.bot_user }}
-          BOT_EMAIL: ${{ inputs.bot_email }}
-          BASE_BRANCH: ${{ inputs.base_branch }}
-        run: |
-          git config user.name "$BOT_USER"
-          git config user.email "$BOT_EMAIL"
-
-          git add -A
-          if [ -n "$(git diff --cached --name-only)" ]; then
-            git commit -m "fix: address issue #${{ github.event.issue.number }}"
-          fi
-
-          if [ -z "$(git log "${BASE_BRANCH}"..HEAD --oneline)" ]; then
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          git push origin "${{ steps.branch.outputs.name }}" 2>&1
+        uses: youngrok-XCENA/relay/.github/actions/format-and-commit@main
+        with:
+          format_command: ${{ inputs.format_command }}
+          base_ref: ${{ inputs.base_branch }}
+          bot_user: ${{ inputs.bot_user }}
+          bot_email: ${{ inputs.bot_email }}
+          commit_message: "fix: address issue #${{ github.event.issue.number }}"
+          push_branch: ${{ steps.branch.outputs.name }}
 
       # ── Stage 2: Create PR ───────────────────────────────────────────
       - name: Create PR
@@ -1691,49 +1603,18 @@ jobs:
           model: ${{ inputs.model }}
           max_turns: ${{ inputs.max_turns }}
 
-      - name: Format PR fix changes
-        if: steps.prfix.outputs.exit_code == '0' && inputs.format_command != ''
-        shell: bash
-        env:
-          FORMAT_COMMAND: ${{ inputs.format_command }}
-          BASE_BRANCH: ${{ inputs.base_branch }}
-        run: |
-          mapfile -t changed_files < <(git diff --name-only "origin/${BASE_BRANCH}...HEAD")
-          if [ ${#changed_files[@]} -eq 0 ]; then
-            exit 0
-          fi
-
-          read -r -a formatter <<< "$FORMAT_COMMAND"
-          "${formatter[@]}" "${changed_files[@]}"
-
-      - name: Commit and push PR fix
+      - name: Format and commit PR fix
         if: steps.prfix.outputs.exit_code == '0'
         id: prfix_push
-        shell: bash
-        env:
-          BOT_USER: ${{ inputs.bot_user }}
-          BOT_EMAIL: ${{ inputs.bot_email }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-          INITIAL_SHA: ${{ steps.prfix_initial_head.outputs.sha }}
-        run: |
-          git config user.name "$BOT_USER"
-          git config user.email "$BOT_EMAIL"
-
-          git add -A
-          if [ -n "$(git diff --cached --name-only)" ]; then
-            git commit -m "fix: address review feedback on PR #${PR_NUMBER}"
-          fi
-
-          if [ "$(git rev-parse HEAD)" = "$INITIAL_SHA" ]; then
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          BRANCH_NAME="${{ steps.branch.outputs.name }}"
-          if [ -n "$(git log "origin/${BRANCH_NAME}"..HEAD --oneline 2>/dev/null)" ]; then
-            git push origin "$BRANCH_NAME" 2>&1
-          fi
+        uses: youngrok-XCENA/relay/.github/actions/format-and-commit@main
+        with:
+          format_command: ${{ inputs.format_command }}
+          base_ref: ${{ steps.prfix_initial_head.outputs.sha }}
+          diff_mode: sha
+          bot_user: ${{ inputs.bot_user }}
+          bot_email: ${{ inputs.bot_email }}
+          commit_message: "fix: address review feedback on PR #${{ steps.pr.outputs.number }}"
+          push_branch: ${{ steps.branch.outputs.name }}
 
       - name: Post PR fix comment
         if: steps.prfix_push.outputs.has_changes == 'true'
@@ -1849,49 +1730,18 @@ jobs:
           model: ${{ inputs.model }}
           max_turns: ${{ inputs.max_prfix_turns }}
 
-      - name: Format checks fix changes attempt 1
-        if: steps.cifix.outputs.exit_code == '0' && inputs.format_command != ''
-        shell: bash
-        env:
-          FORMAT_COMMAND: ${{ inputs.format_command }}
-          BASE_BRANCH: ${{ inputs.base_branch }}
-        run: |
-          mapfile -t changed_files < <(git diff --name-only "origin/${BASE_BRANCH}...HEAD")
-          if [ ${#changed_files[@]} -eq 0 ]; then
-            exit 0
-          fi
-
-          read -r -a formatter <<< "$FORMAT_COMMAND"
-          "${formatter[@]}" "${changed_files[@]}"
-
-      - name: Commit and push checks fix attempt 1
+      - name: Format and commit checks fix attempt 1
         if: steps.cifix.outcome == 'success' && steps.cifix.outputs.exit_code == '0'
         id: cifix_push
-        shell: bash
-        env:
-          BOT_USER: ${{ inputs.bot_user }}
-          BOT_EMAIL: ${{ inputs.bot_email }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-          INITIAL_SHA: ${{ steps.cifix_initial_head.outputs.sha }}
-        run: |
-          git config user.name "$BOT_USER"
-          git config user.email "$BOT_EMAIL"
-
-          git add -A
-          if [ -n "$(git diff --cached --name-only)" ]; then
-            git commit -m "fix: address failing PR checks on PR #${PR_NUMBER}"
-          fi
-
-          if [ "$(git rev-parse HEAD)" = "$INITIAL_SHA" ]; then
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          BRANCH_NAME="${{ steps.branch.outputs.name }}"
-          if [ -n "$(git log "origin/${BRANCH_NAME}"..HEAD --oneline 2>/dev/null)" ]; then
-            git push origin "$BRANCH_NAME" 2>&1
-          fi
+        uses: youngrok-XCENA/relay/.github/actions/format-and-commit@main
+        with:
+          format_command: ${{ inputs.format_command }}
+          base_ref: ${{ steps.cifix_initial_head.outputs.sha }}
+          diff_mode: sha
+          bot_user: ${{ inputs.bot_user }}
+          bot_email: ${{ inputs.bot_email }}
+          commit_message: "fix: address failing PR checks on PR #${{ steps.pr.outputs.number }}"
+          push_branch: ${{ steps.branch.outputs.name }}
 
       - name: Post checks fix comment attempt 1
         if: steps.cifix_push.outputs.has_changes == 'true'
@@ -1982,49 +1832,18 @@ jobs:
           model: ${{ inputs.model }}
           max_turns: ${{ inputs.max_prfix_turns }}
 
-      - name: Format checks fix changes attempt 2
-        if: steps.cifix_2.outputs.exit_code == '0' && inputs.format_command != ''
-        shell: bash
-        env:
-          FORMAT_COMMAND: ${{ inputs.format_command }}
-          BASE_BRANCH: ${{ inputs.base_branch }}
-        run: |
-          mapfile -t changed_files < <(git diff --name-only "origin/${BASE_BRANCH}...HEAD")
-          if [ ${#changed_files[@]} -eq 0 ]; then
-            exit 0
-          fi
-
-          read -r -a formatter <<< "$FORMAT_COMMAND"
-          "${formatter[@]}" "${changed_files[@]}"
-
-      - name: Commit and push checks fix attempt 2
+      - name: Format and commit checks fix attempt 2
         if: steps.cifix_2.outcome == 'success' && steps.cifix_2.outputs.exit_code == '0'
         id: cifix_2_push
-        shell: bash
-        env:
-          BOT_USER: ${{ inputs.bot_user }}
-          BOT_EMAIL: ${{ inputs.bot_email }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-          INITIAL_SHA: ${{ steps.cifix_2_initial_head.outputs.sha }}
-        run: |
-          git config user.name "$BOT_USER"
-          git config user.email "$BOT_EMAIL"
-
-          git add -A
-          if [ -n "$(git diff --cached --name-only)" ]; then
-            git commit -m "fix: address failing PR checks on PR #${PR_NUMBER} (attempt 2)"
-          fi
-
-          if [ "$(git rev-parse HEAD)" = "$INITIAL_SHA" ]; then
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          BRANCH_NAME="${{ steps.branch.outputs.name }}"
-          if [ -n "$(git log "origin/${BRANCH_NAME}"..HEAD --oneline 2>/dev/null)" ]; then
-            git push origin "$BRANCH_NAME" 2>&1
-          fi
+        uses: youngrok-XCENA/relay/.github/actions/format-and-commit@main
+        with:
+          format_command: ${{ inputs.format_command }}
+          base_ref: ${{ steps.cifix_2_initial_head.outputs.sha }}
+          diff_mode: sha
+          bot_user: ${{ inputs.bot_user }}
+          bot_email: ${{ inputs.bot_email }}
+          commit_message: "fix: address failing PR checks on PR #${{ steps.pr.outputs.number }} (attempt 2)"
+          push_branch: ${{ steps.branch.outputs.name }}
 
       - name: Post checks fix comment attempt 2
         if: steps.cifix_2_push.outputs.has_changes == 'true'
@@ -2115,49 +1934,18 @@ jobs:
           model: ${{ inputs.model }}
           max_turns: ${{ inputs.max_prfix_turns }}
 
-      - name: Format checks fix changes attempt 3
-        if: steps.cifix_3.outputs.exit_code == '0' && inputs.format_command != ''
-        shell: bash
-        env:
-          FORMAT_COMMAND: ${{ inputs.format_command }}
-          BASE_BRANCH: ${{ inputs.base_branch }}
-        run: |
-          mapfile -t changed_files < <(git diff --name-only "origin/${BASE_BRANCH}...HEAD")
-          if [ ${#changed_files[@]} -eq 0 ]; then
-            exit 0
-          fi
-
-          read -r -a formatter <<< "$FORMAT_COMMAND"
-          "${formatter[@]}" "${changed_files[@]}"
-
-      - name: Commit and push checks fix attempt 3
+      - name: Format and commit checks fix attempt 3
         if: steps.cifix_3.outcome == 'success' && steps.cifix_3.outputs.exit_code == '0'
         id: cifix_3_push
-        shell: bash
-        env:
-          BOT_USER: ${{ inputs.bot_user }}
-          BOT_EMAIL: ${{ inputs.bot_email }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-          INITIAL_SHA: ${{ steps.cifix_3_initial_head.outputs.sha }}
-        run: |
-          git config user.name "$BOT_USER"
-          git config user.email "$BOT_EMAIL"
-
-          git add -A
-          if [ -n "$(git diff --cached --name-only)" ]; then
-            git commit -m "fix: address failing PR checks on PR #${PR_NUMBER} (attempt 3)"
-          fi
-
-          if [ "$(git rev-parse HEAD)" = "$INITIAL_SHA" ]; then
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          BRANCH_NAME="${{ steps.branch.outputs.name }}"
-          if [ -n "$(git log "origin/${BRANCH_NAME}"..HEAD --oneline 2>/dev/null)" ]; then
-            git push origin "$BRANCH_NAME" 2>&1
-          fi
+        uses: youngrok-XCENA/relay/.github/actions/format-and-commit@main
+        with:
+          format_command: ${{ inputs.format_command }}
+          base_ref: ${{ steps.cifix_3_initial_head.outputs.sha }}
+          diff_mode: sha
+          bot_user: ${{ inputs.bot_user }}
+          bot_email: ${{ inputs.bot_email }}
+          commit_message: "fix: address failing PR checks on PR #${{ steps.pr.outputs.number }} (attempt 3)"
+          push_branch: ${{ steps.branch.outputs.name }}
 
       - name: Post checks fix comment attempt 3
         if: steps.cifix_3_push.outputs.has_changes == 'true'
