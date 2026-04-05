@@ -22,6 +22,8 @@ errors = []
 PAIRS = [
     ('claude-caller.yml', 'claude.yml'),
     ('codex-caller.yml', 'codex.yml'),
+    ('relay-claude.yml', 'relay.yml'),
+    ('relay-codex.yml', 'relay.yml'),
 ]
 
 for caller_name, reusable_name in PAIRS:

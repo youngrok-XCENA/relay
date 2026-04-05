@@ -45,8 +45,8 @@ touch "$TMP_DIR/.github/workflows/code-style-caller.yml"
 
 install_workflows "$TMP_DIR" "youngrok-XCENA/local-test" "main" >/dev/null
 
-CLAUDE_CALLER="$TMP_DIR/.github/workflows/claude-caller.yml"
-CODEX_CALLER="$TMP_DIR/.github/workflows/codex-caller.yml"
+CLAUDE_CALLER="$TMP_DIR/.github/workflows/relay-claude.yml"
+CODEX_CALLER="$TMP_DIR/.github/workflows/relay-codex.yml"
 
 assert_file_exists "$CLAUDE_CALLER"
 assert_file_exists "$CODEX_CALLER"

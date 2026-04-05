@@ -1,0 +1,2459 @@
+name: Relay
+
+on:
+  workflow_call:
+    inputs:
+      agent:
+        description: "AI agent to use: claude or codex"
+        type: string
+        required: true
+      mode:
+        type: string
+        required: true
+      model:
+        type: string
+        default: ""
+      project_description:
+        type: string
+        required: true
+      code_style_guide:
+        type: string
+        required: false
+        default: ""
+      build_command:
+        type: string
+        required: false
+        default: ""
+      test_command:
+        type: string
+        required: false
+        default: ""
+      format_command:
+        type: string
+        default: ""
+      file_extensions:
+        type: string
+        default: ""
+      review_focus:
+        type: string
+        default: ""
+      max_turns:
+        type: number
+        default: 75
+      max_prfix_turns:
+        type: number
+        default: 50
+      max_review_turns:
+        type: number
+        default: 30
+      max_diff_size:
+        type: number
+        default: 100000
+      trigger_command:
+        type: string
+        default: ""
+      title_keyword:
+        type: string
+        required: true
+      auto_title_keyword:
+        type: string
+        default: ""
+      trigger_label:
+        type: string
+        default: "auto-fix"
+      branch_prefix:
+        type: string
+        required: true
+      base_branch:
+        type: string
+        default: "main"
+      bot_user:
+        type: string
+        required: true
+      bot_email:
+        type: string
+        required: true
+      pr_template:
+        type: string
+        default: ""
+      timeout_minutes:
+        type: number
+        default: 30
+      check_wait_minutes:
+        type: number
+        default: 10
+      check_poll_interval_seconds:
+        type: number
+        default: 15
+      max_check_fix_attempts:
+        type: number
+        default: 3
+      runner:
+        type: string
+        required: true
+      node_path:
+        type: string
+        default: ""
+      codex_sandbox:
+        type: string
+        default: "read-only"
+    secrets:
+      GH_PAT:
+        required: false
+
+# ════════════════════════════════════════════════════════════════
+#  REVIEW
+# ════════════════════════════════════════════════════════════════
+
+jobs:
+  parse-review:
+    name: Parse command
+    if: >
+      inputs.mode == 'review' &&
+      startsWith(github.event.comment.body, inputs.trigger_command) &&
+      (github.event_name == 'pull_request_review_comment' || github.event.issue.pull_request)
+    runs-on: ubuntu-latest
+    outputs:
+      prompt: ${{ steps.extract.outputs.prompt }}
+      head_ref: ${{ steps.pr-info.outputs.head_ref }}
+      base_ref: ${{ steps.pr-info.outputs.base_ref }}
+      pr_number: ${{ steps.pr-info.outputs.pr_number }}
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+    steps:
+      - name: React with eyes
+        uses: youngrok-XCENA/relay/.github/actions/react-emoji@main
+        with:
+          url: ${{ github.event.comment.url }}
+          reaction: eyes
+          token: ${{ secrets.GH_PAT || github.token }}
+
+      - name: Extract user prompt
+        id: extract
+        shell: bash
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          TRIGGER_COMMAND: ${{ inputs.trigger_command }}
+        run: |
+          prompt=$(printf "%s" "$COMMENT_BODY" | sed "s|${TRIGGER_COMMAND}||" | xargs)
+          {
+            echo "prompt<<GHEOF"
+            echo "$prompt"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Get PR info
+        id: pr-info
+        shell: bash
+        run: |
+          PR_URL="${{ github.event.issue.pull_request.url || github.event.pull_request.url }}"
+          PR_JSON=$(curl -s -H "Authorization: token ${GH_TOKEN}" -H "Accept: application/vnd.github.v3+json" "$PR_URL")
+          {
+            echo "head_ref=$(echo "$PR_JSON" | jq -r '.head.ref')"
+            echo "base_ref=$(echo "$PR_JSON" | jq -r '.base.ref')"
+            echo "pr_number=$(echo "$PR_JSON" | jq -r '.number')"
+          } >> "$GITHUB_OUTPUT"
+
+  review:
+    name: Agent Review
+    needs: [parse-review]
+    if: inputs.mode == 'review' && needs.parse-review.result == 'success'
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    concurrency:
+      group: ${{ inputs.agent }}-pr-${{ needs.parse-review.outputs.pr_number }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+      FILE_EXTENSIONS: ${{ inputs.file_extensions }}
+      MAX_DIFF_SIZE: ${{ inputs.max_diff_size }}
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.parse-review.outputs.head_ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || github.token }}
+
+      - name: Get diff
+        id: diff
+        shell: bash
+        run: |
+          read -r -a patterns <<< "$FILE_EXTENSIONS"
+          DIFF=$(git diff "origin/${{ needs.parse-review.outputs.base_ref }}...origin/${{ needs.parse-review.outputs.head_ref }}" -- "${patterns[@]}" | head -c "$MAX_DIFF_SIZE")
+          {
+            echo "diff<<GHEOF"
+            echo "$DIFF"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build review prompt
+        id: prompt
+        shell: bash
+        env:
+          USER_PROMPT: ${{ needs.parse-review.outputs.prompt }}
+          DIFF: ${{ steps.diff.outputs.diff }}
+          PROJECT_DESCRIPTION: ${{ inputs.project_description }}
+          REVIEW_FOCUS: ${{ inputs.review_focus }}
+          CODE_STYLE_GUIDE: ${{ inputs.code_style_guide }}
+        run: |
+          PROMPT="You are reviewing a pull request for the ${PROJECT_DESCRIPTION} project.
+
+          ## Review Guidelines
+          - Focus on: ${REVIEW_FOCUS}
+          - Code style: ${CODE_STYLE_GUIDE}
+          - Classify issues as CRITICAL / HIGH / MEDIUM / LOW
+          - Be specific with file paths and line numbers
+          - Be concise. Skip praise, go straight to issues.
+          - Return only the review comment body text
+          - Do not post comments, reviews, or use GitHub tools
+          - Do not describe tool/auth limitations
+          - The workflow will post the review
+
+          ## PR Diff
+          \`\`\`diff
+          ${DIFF}
+          \`\`\`"
+
+          if [ -n "$USER_PROMPT" ]; then
+            PROMPT="${PROMPT}
+
+          ## Additional Instructions
+          ${USER_PROMPT}"
+          fi
+
+          {
+            echo "prompt<<GHEOF"
+            echo "$PROMPT"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run agent
+        id: agent_run
+        uses: youngrok-XCENA/relay/.github/actions/run-agent@main
+        with:
+          agent: ${{ inputs.agent }}
+          node_path: ${{ inputs.node_path }}
+          codex_sandbox: ${{ inputs.codex_sandbox }}
+          prompt: ${{ steps.prompt.outputs.prompt }}
+          model: ${{ inputs.model }}
+          max_turns: ${{ inputs.max_review_turns }}
+
+      - name: Build review comment
+        if: always()
+        id: comment
+        shell: bash
+        env:
+          RESULT: ${{ steps.agent_run.outputs.result }}
+          EXIT_CODE: ${{ steps.agent_run.outputs.exit_code }}
+          FAILURE_TYPE: ${{ steps.agent_run.outputs.failure_type }}
+        run: |
+          FOOTER="
+
+          ---
+          > 🤖 *${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} CI · [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          if [ "$EXIT_CODE" = "0" ] && [ -n "$RESULT" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Review
+
+          ${RESULT}${FOOTER}"
+          elif [ "$FAILURE_TYPE" = "usage_limit" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Review
+
+          ❌ Review could not run because the AI agent account appears to have reached its usage limit. Retry after the limit resets or more quota is available. Check [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).${FOOTER}"
+          elif [ "$FAILURE_TYPE" = "auth_error" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Review
+
+          ❌ Review could not run due to an authentication error. The API token may be expired or invalid. Please check the relevant API key secret. Check [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).${FOOTER}"
+          else
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Review
+
+          ❌ Review failed. Check [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).${FOOTER}"
+          fi
+
+          {
+            echo "body<<GHEOF"
+            echo "$BODY"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post review comment
+        if: always()
+        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
+        with:
+          body: ${{ steps.comment.outputs.body }}
+          target: ${{ needs.parse-review.outputs.pr_number }}
+          type: pr
+          repository: ${{ github.repository }}
+
+      - name: React completion
+        if: always()
+        uses: youngrok-XCENA/relay/.github/actions/react-emoji@main
+        with:
+          url: ${{ github.event.comment.url }}
+          reaction: ${{ steps.agent_run.outputs.exit_code == '0' && 'rocket' || '-1' }}
+          token: ${{ secrets.GH_PAT || github.token }}
+
+  notify-review-timeout:
+    name: Notify Review Timeout
+    needs: [parse-review, review]
+    if: inputs.mode == 'review' && cancelled() && needs.parse-review.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+    steps:
+      - name: Post timeout comment
+        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
+        with:
+          body: |
+            ### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Review
+
+            ⏱️ Review timed out. The self-hosted runner may be unavailable or under heavy load. Check [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) and retry.
+          target: ${{ needs.parse-review.outputs.pr_number }}
+          type: pr
+          repository: ${{ github.repository }}
+
+# ════════════════════════════════════════════════════════════════
+#  FIX (issue → new branch → PR)
+# ════════════════════════════════════════════════════════════════
+
+  fix:
+    name: Agent Fix
+    if: >
+      inputs.mode == 'fix' &&
+      !github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, inputs.trigger_command)
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    concurrency:
+      group: ${{ inputs.agent }}-fix-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+    steps:
+      - name: React with eyes
+        uses: youngrok-XCENA/relay/.github/actions/react-emoji@main
+        with:
+          url: ${{ github.event.comment.url }}
+          reaction: eyes
+          token: ${{ secrets.GH_PAT || github.token }}
+
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || github.token }}
+
+      - name: Create fix branch
+        id: branch
+        shell: bash
+        env:
+          BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+        run: |
+          BRANCH="${BRANCH_PREFIX}${{ github.event.issue.number }}"
+          git push origin --delete "$BRANCH" 2>/dev/null || true
+          git checkout -b "$BRANCH"
+          echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Initialize submodules
+        shell: bash
+        run: git submodule update --init --recursive || { echo "::error::Submodule initialization failed"; exit 1; }
+
+      - name: Collect issue context
+        id: context
+        shell: bash
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PROJECT_DESCRIPTION: ${{ inputs.project_description }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
+          TEST_COMMAND: ${{ inputs.test_command }}
+          FORMAT_COMMAND: ${{ inputs.format_command }}
+          CODE_STYLE_GUIDE: ${{ inputs.code_style_guide }}
+          PR_TEMPLATE: ${{ inputs.pr_template }}
+        run: |
+          COMMENTS=$(gh api "repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments" \
+            --paginate \
+            --jq '[.[] | select((.body | startswith("### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Issue Analysis")) or (.body | startswith("### Claude 이슈 분석"))) | .body] | join("\n\n---\n\n")' 2>/dev/null || echo "")
+
+          USER_PROMPT=$(echo "$COMMENT_BODY" | sed "s|${TRIGGER_COMMAND}||" | xargs)
+
+          # Read PR template from the repository if not provided via input
+          TMPL="$PR_TEMPLATE"
+          if [ -z "$TMPL" ]; then
+            for f in .github/pull_request_template.md .github/PULL_REQUEST_TEMPLATE.md; do
+              if [ -f "$f" ]; then
+                TMPL=$(cat "$f")
+                break
+              fi
+            done
+          fi
+
+          PROMPT="You are fixing a GitHub issue for the ${PROJECT_DESCRIPTION} project.
+
+          ## Issue #${ISSUE_NUMBER}
+          **Title:** ${ISSUE_TITLE}
+
+          **Body:**
+          ${ISSUE_BODY}"
+
+          if [ -n "$COMMENTS" ]; then
+            PROMPT="${PROMPT}
+
+          ## Previous Analysis
+          ${COMMENTS}"
+          fi
+
+          if [ -n "$USER_PROMPT" ]; then
+            PROMPT="${PROMPT}
+
+          ## Additional Instructions
+          ${USER_PROMPT}"
+          fi
+
+          PROMPT="${PROMPT}
+
+          ## Rules
+          - Fix only the issue described above. Do not refactor unrelated code.
+          - Follow this code style guide: ${CODE_STYLE_GUIDE}
+          - Build and verify with: ${BUILD_COMMAND}
+          - Run relevant tests if possible with: ${TEST_COMMAND}
+          - If format_command is non-empty, run it on changed files after the fix: ${FORMAT_COMMAND}
+          - If you add new functionality, write tests for it.
+          - Do not modify files outside the scope of this issue.
+          - Do not post issue comments, create PRs, or use GitHub tools for side effects.
+          - Do not describe tool/auth limitations in the final response."
+
+          PROMPT="${PROMPT}
+
+          ## CRITICAL: Output Format
+          Your response will be used directly as the PR body. You MUST:
+          1. Output NOTHING before the first section header. No preamble, no status messages.
+          2. Start with these sections in this exact order:
+
+          ### Why
+          Explain why this change is needed. What problem exists if this is not applied?
+
+          ### Design changes (optional)
+          If there are structural changes (e.g. call flow, module boundaries, data flow), include a mermaid diagram. Skip this section if the change is simple (config, typo, single-function edit)."
+
+          if [ -n "$TMPL" ]; then
+            PROMPT="${PROMPT}
+
+          3. After the above sections, fill in the following PR template. Keep every section header, replace HTML comments with actual content. Leave optional sections with just a dash (-) if not applicable.
+
+          ${TMPL}"
+          fi
+
+          {
+            echo "prompt<<GHEOF"
+            echo "$PROMPT"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run agent
+        id: agent_run
+        uses: youngrok-XCENA/relay/.github/actions/run-agent@main
+        with:
+          agent: ${{ inputs.agent }}
+          node_path: ${{ inputs.node_path }}
+          codex_sandbox: ${{ inputs.codex_sandbox }}
+          prompt: ${{ steps.context.outputs.prompt }}
+          model: ${{ inputs.model }}
+          max_turns: ${{ inputs.max_turns }}
+
+      - name: Format changed files
+        if: steps.agent_run.outputs.exit_code == '0' && inputs.format_command != ''
+        shell: bash
+        env:
+          FORMAT_COMMAND: ${{ inputs.format_command }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          mapfile -t changed_files < <(git diff --name-only "${BASE_BRANCH}...HEAD")
+          if [ ${#changed_files[@]} -eq 0 ]; then
+            exit 0
+          fi
+
+          read -r -a formatter <<< "$FORMAT_COMMAND"
+          "${formatter[@]}" "${changed_files[@]}"
+
+      - name: Commit and push changes
+        if: steps.agent_run.outputs.exit_code == '0'
+        id: push
+        shell: bash
+        env:
+          BOT_USER: ${{ inputs.bot_user }}
+          BOT_EMAIL: ${{ inputs.bot_email }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          git config user.name "$BOT_USER"
+          git config user.email "$BOT_EMAIL"
+
+          git add -A
+          if [ -n "$(git diff --cached --name-only)" ]; then
+            git commit -m "fix: address issue #${{ github.event.issue.number }}"
+          fi
+
+          if [ -z "$(git log "${BASE_BRANCH}"..HEAD --oneline)" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          git push origin "${{ steps.branch.outputs.name }}" 2>&1
+
+      - name: Create PR
+        if: steps.agent_run.outputs.exit_code == '0' && steps.push.outputs.has_changes == 'true'
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+          RESULT: ${{ steps.agent_run.outputs.result }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          BRANCH_NAME: ${{ steps.branch.outputs.name }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          EXISTING_PR=$(gh pr list --repo "${{ github.repository }}" --head "${BRANCH_NAME}" --json url --jq '.[0].url // empty')
+          if [ -n "$EXISTING_PR" ]; then
+            echo "url=${EXISTING_PR}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Strip any preamble text before the first markdown heading
+          CLEAN_RESULT=$(echo "${RESULT}" | sed -n '/^#/,$p' | head -c 60000)
+          if [ -z "$CLEAN_RESULT" ]; then
+            CLEAN_RESULT=$(echo "${RESULT}" | head -c 60000)
+          fi
+
+          PR_BODY_FILE=$(mktemp)
+          {
+            echo "$CLEAN_RESULT"
+            echo ""
+            echo ""
+            echo "Closes #${ISSUE_NUMBER}"
+          } > "$PR_BODY_FILE"
+
+          PR_URL=$(gh pr create \
+            --repo "${{ github.repository }}" \
+            --head "${BRANCH_NAME}" \
+            --base "${BASE_BRANCH}" \
+            --title "fix: ${ISSUE_TITLE}" \
+            --body-file "$PR_BODY_FILE" 2>&1 | grep -o 'https://.*' || true)
+
+          rm -f "$PR_BODY_FILE"
+
+          if [ -z "$PR_URL" ]; then
+            PR_URL=$(gh pr list --repo "${{ github.repository }}" --head "${BRANCH_NAME}" --json url --jq '.[0].url // empty')
+          fi
+
+          echo "url=${PR_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Build fix comment
+        if: always()
+        id: comment
+        shell: bash
+        env:
+          EXIT_CODE: ${{ steps.agent_run.outputs.exit_code }}
+          FAILURE_TYPE: ${{ steps.agent_run.outputs.failure_type }}
+          RESULT: ${{ steps.agent_run.outputs.result }}
+          HAS_CHANGES: ${{ steps.push.outputs.has_changes }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+        run: |
+          if [ "$EXIT_CODE" != "0" ] && [ "$FAILURE_TYPE" = "usage_limit" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Fix
+
+          ❌ 수정을 실행할 수 없습니다. AI 에이전트 계정이 사용량 한도에 도달한 것 같습니다. 한도가 리셋되거나 추가 쿼터가 생기면 재시도하세요. [워크플로우 로그](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})를 확인하세요."
+          elif [ "$EXIT_CODE" != "0" ] && [ "$FAILURE_TYPE" = "auth_error" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Fix
+
+          ❌ 수정을 실행할 수 없습니다. 인증 오류가 발생했습니다. API 토큰이 만료되었거나 유효하지 않을 수 있습니다. 관련 API 키 시크릿을 확인해 주세요. [워크플로우 로그](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})를 확인하세요."
+          elif [ "$EXIT_CODE" != "0" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Fix
+
+          ❌ 수정에 실패했습니다. [워크플로우 로그](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})를 확인하세요."
+          elif [ "$HAS_CHANGES" = "true" ] && [ -n "$PR_URL" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Fix
+
+          PR 생성 완료: ${PR_URL}
+
+          <details><summary>작업 내용</summary>
+
+          ${RESULT}
+
+          </details>"
+          elif [ "$HAS_CHANGES" = "false" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Fix
+
+          수정할 내용을 찾지 못했습니다.
+
+          <details><summary>에이전트 출력</summary>
+
+          ${RESULT}
+
+          </details>"
+          else
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Fix
+
+          ❌ PR 생성 또는 푸시에 실패했습니다. [워크플로우 로그](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})를 확인하세요."
+          fi
+
+          {
+            echo "body<<GHEOF"
+            echo "$BODY"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post result comment
+        if: always()
+        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
+        with:
+          body: ${{ steps.comment.outputs.body }}
+          target: ${{ github.event.issue.number }}
+          type: issue
+          repository: ${{ github.repository }}
+
+      - name: React completion
+        if: always()
+        uses: youngrok-XCENA/relay/.github/actions/react-emoji@main
+        with:
+          url: ${{ github.event.comment.url }}
+          reaction: ${{ steps.agent_run.outputs.exit_code == '0' && (steps.push.outputs.has_changes == 'false' || steps.pr.outputs.url != '') && 'rocket' || '-1' }}
+          token: ${{ secrets.GH_PAT || github.token }}
+
+  notify-fix-timeout:
+    name: Notify Fix Timeout
+    needs: [fix]
+    if: inputs.mode == 'fix' && cancelled()
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+    steps:
+      - name: Post timeout comment
+        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
+        with:
+          body: |
+            ### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Fix
+
+            ⏱️ Fix timed out after ${{ inputs.timeout_minutes }} minutes. The self-hosted runner may be unavailable or under heavy load. Check [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) and retry.
+          target: ${{ github.event.issue.number }}
+          type: issue
+          repository: ${{ github.repository }}
+
+# ════════════════════════════════════════════════════════════════
+#  PR-FIX (patch existing PR from review feedback)
+# ════════════════════════════════════════════════════════════════
+
+  parse-pr-fix:
+    name: Parse PR fix command
+    if: >
+      inputs.mode == 'pr-fix' &&
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, inputs.trigger_command)
+    runs-on: ubuntu-latest
+    outputs:
+      prompt: ${{ steps.extract.outputs.prompt }}
+      head_ref: ${{ steps.pr-info.outputs.head_ref }}
+      base_ref: ${{ steps.pr-info.outputs.base_ref }}
+      pr_number: ${{ steps.pr-info.outputs.pr_number }}
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+    steps:
+      - name: React with eyes
+        uses: youngrok-XCENA/relay/.github/actions/react-emoji@main
+        with:
+          url: ${{ github.event.comment.url }}
+          reaction: eyes
+          token: ${{ secrets.GH_PAT || github.token }}
+
+      - name: Extract user prompt
+        id: extract
+        shell: bash
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          prompt=$(echo "$COMMENT_BODY" | sed "s|${TRIGGER_COMMAND}||" | xargs)
+          {
+            echo "prompt<<GHEOF"
+            echo "$prompt"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Get PR info
+        id: pr-info
+        shell: bash
+        run: |
+          PR_URL="${{ github.event.issue.pull_request.url }}"
+          PR_JSON=$(curl -s -H "Authorization: token ${GH_TOKEN}" -H "Accept: application/vnd.github.v3+json" "$PR_URL")
+          {
+            echo "head_ref=$(echo "$PR_JSON" | jq -r '.head.ref')"
+            echo "base_ref=$(echo "$PR_JSON" | jq -r '.base.ref')"
+            echo "pr_number=$(echo "$PR_JSON" | jq -r '.number')"
+          } >> "$GITHUB_OUTPUT"
+
+  pr-fix:
+    name: Agent PR Fix
+    needs: parse-pr-fix
+    if: inputs.mode == 'pr-fix' && needs.parse-pr-fix.result == 'success'
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    concurrency:
+      group: ${{ inputs.agent }}-pr-fix-${{ needs.parse-pr-fix.outputs.pr_number }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.parse-pr-fix.outputs.head_ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || github.token }}
+
+      - name: Initialize submodules
+        shell: bash
+        run: |
+          git submodule update --init --recursive || {
+            echo "::error::Submodule initialization failed"
+            exit 1
+          }
+
+      - name: Build prompt
+        id: prompt
+        shell: bash
+        env:
+          USER_PROMPT: ${{ needs.parse-pr-fix.outputs.prompt }}
+          HEAD_REF: ${{ needs.parse-pr-fix.outputs.head_ref }}
+          BASE_REF: ${{ needs.parse-pr-fix.outputs.base_ref }}
+          PR_NUMBER: ${{ needs.parse-pr-fix.outputs.pr_number }}
+          PROJECT_DESCRIPTION: ${{ inputs.project_description }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
+          TEST_COMMAND: ${{ inputs.test_command }}
+          FORMAT_COMMAND: ${{ inputs.format_command }}
+          CODE_STYLE_GUIDE: ${{ inputs.code_style_guide }}
+        run: |
+          DIFF=$(git diff "origin/${BASE_REF}...HEAD" | head -c 100000)
+
+          REVIEW_COMMENTS=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/comments" \
+            --paginate \
+            --jq '[.[] | "\(.user.login) on \(.path):\(.line // .original_line):\n\(.body)"] | join("\n\n---\n\n")' 2>/dev/null || echo "")
+
+          PR_COMMENTS=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --paginate \
+            --jq '[.[] | "\(.user.login):\n\(.body)"] | join("\n\n---\n\n")' 2>/dev/null || echo "")
+
+          PR_JSON=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}" 2>/dev/null || echo "{}")
+          PR_TITLE=$(echo "$PR_JSON" | jq -r '.title // empty')
+          PR_BODY=$(echo "$PR_JSON" | jq -r '.body // empty')
+
+          PROMPT="You are patching an existing pull request for the ${PROJECT_DESCRIPTION} project.
+
+          ## PR #${PR_NUMBER}
+          **Title:** ${PR_TITLE}
+          **Branch:** ${HEAD_REF} -> ${BASE_REF}
+
+          **Description:**
+          ${PR_BODY}"
+
+          if [ -n "$REVIEW_COMMENTS" ]; then
+            PROMPT="${PROMPT}
+
+          ## Code Review Comments
+          ${REVIEW_COMMENTS}"
+          fi
+
+          if [ -n "$PR_COMMENTS" ]; then
+            PROMPT="${PROMPT}
+
+          ## PR Conversation
+          ${PR_COMMENTS}"
+          fi
+
+          PROMPT="${PROMPT}
+
+          ## Current Diff
+          \`\`\`diff
+          ${DIFF}
+          \`\`\`"
+
+          if [ -n "$USER_PROMPT" ]; then
+            PROMPT="${PROMPT}
+
+          ## Additional Instructions
+          ${USER_PROMPT}"
+          fi
+
+          PROMPT="${PROMPT}
+
+          ## Rules
+          - Address the feedback from review comments and PR conversation above.
+          - Follow this code style guide: ${CODE_STYLE_GUIDE}
+          - Build and verify with: ${BUILD_COMMAND}
+          - Run relevant tests if possible with: ${TEST_COMMAND}
+          - If format_command is non-empty, run it on changed files after the fix: ${FORMAT_COMMAND}
+          - Do not modify files outside the scope of the requested changes.
+          - Do not post issue comments, create PRs, or use GitHub tools for side effects.
+          - Do not describe tool/auth limitations in the final response.
+          - Return only the work summary; the workflow handles GitHub updates."
+
+          {
+            echo "prompt<<GHEOF"
+            echo "$PROMPT"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Record initial HEAD
+        id: initial_head
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Run agent
+        id: agent_run
+        uses: youngrok-XCENA/relay/.github/actions/run-agent@main
+        with:
+          agent: ${{ inputs.agent }}
+          node_path: ${{ inputs.node_path }}
+          codex_sandbox: ${{ inputs.codex_sandbox }}
+          prompt: ${{ steps.prompt.outputs.prompt }}
+          model: ${{ inputs.model }}
+          max_turns: ${{ inputs.max_prfix_turns }}
+
+      - name: Format changed files
+        if: steps.agent_run.outputs.exit_code == '0' && inputs.format_command != ''
+        shell: bash
+        env:
+          FORMAT_COMMAND: ${{ inputs.format_command }}
+          BASE_REF: ${{ needs.parse-pr-fix.outputs.base_ref }}
+        run: |
+          mapfile -t changed_files < <(git diff --name-only "origin/${BASE_REF}...HEAD")
+          if [ ${#changed_files[@]} -eq 0 ]; then
+            exit 0
+          fi
+
+          read -r -a formatter <<< "$FORMAT_COMMAND"
+          "${formatter[@]}" "${changed_files[@]}"
+
+      - name: Commit and push
+        if: steps.agent_run.outputs.exit_code == '0'
+        id: push
+        shell: bash
+        env:
+          BOT_USER: ${{ inputs.bot_user }}
+          BOT_EMAIL: ${{ inputs.bot_email }}
+          HEAD_REF: ${{ needs.parse-pr-fix.outputs.head_ref }}
+          PR_NUMBER: ${{ needs.parse-pr-fix.outputs.pr_number }}
+          INITIAL_SHA: ${{ steps.initial_head.outputs.sha }}
+          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+        run: |
+          git config user.name "$BOT_USER"
+          git config user.email "$BOT_EMAIL"
+
+          git add -A
+          if [ -n "$(git diff --cached --name-only)" ]; then
+            git commit -m "fix: address review feedback on PR #${PR_NUMBER}"
+          fi
+
+          if [ "$(git rev-parse HEAD)" = "$INITIAL_SHA" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          if [ -n "$(git log "origin/${HEAD_REF}"..HEAD --oneline 2>/dev/null)" ]; then
+            git push origin "$HEAD_REF" 2>&1
+          fi
+
+      - name: Build result comment
+        if: always()
+        id: comment
+        shell: bash
+        env:
+          EXIT_CODE: ${{ steps.agent_run.outputs.exit_code }}
+          FAILURE_TYPE: ${{ steps.agent_run.outputs.failure_type }}
+          RESULT: ${{ steps.agent_run.outputs.result }}
+          HAS_CHANGES: ${{ steps.push.outputs.has_changes }}
+        run: |
+          FOOTER="
+
+          ---
+          > 🤖 *${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} CI · [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          if [ "$FAILURE_TYPE" = "usage_limit" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} PR Fix
+
+          ❌ Usage limit에 도달하여 실행할 수 없습니다. 한도 초기화 후 다시 시도하세요. [워크플로우 로그](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).${FOOTER}"
+          elif [ "$FAILURE_TYPE" = "auth_error" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} PR Fix
+
+          ❌ 인증 오류가 발생했습니다. API 키를 확인하세요. [워크플로우 로그](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).${FOOTER}"
+          elif [ "$EXIT_CODE" != "0" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} PR Fix
+
+          ❌ 수정에 실패했습니다. [워크플로우 로그](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).${FOOTER}"
+          elif [ "$HAS_CHANGES" = "true" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} PR Fix
+
+          추가 패치를 커밋했습니다.
+
+          <details><summary>작업 내용</summary>
+
+          ${RESULT}
+
+          </details>${FOOTER}"
+          else
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} PR Fix
+
+          수정할 내용을 찾지 못했습니다.
+
+          <details><summary>에이전트 출력</summary>
+
+          ${RESULT}
+
+          </details>${FOOTER}"
+          fi
+
+          {
+            echo "body<<GHEOF"
+            echo "$BODY"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post result comment
+        if: always()
+        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
+        with:
+          body: ${{ steps.comment.outputs.body }}
+          target: ${{ needs.parse-pr-fix.outputs.pr_number }}
+          type: pr
+          repository: ${{ github.repository }}
+
+      - name: React completion
+        if: always()
+        uses: youngrok-XCENA/relay/.github/actions/react-emoji@main
+        with:
+          url: ${{ github.event.comment.url }}
+          reaction: ${{ steps.agent_run.outputs.exit_code == '0' && 'rocket' || '-1' }}
+          token: ${{ secrets.GH_PAT || github.token }}
+
+  notify-pr-fix-timeout:
+    name: Notify PR Fix Timeout
+    needs: [parse-pr-fix, pr-fix]
+    if: inputs.mode == 'pr-fix' && cancelled() && needs.parse-pr-fix.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+    steps:
+      - name: Post timeout comment
+        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
+        with:
+          body: |
+            ### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} PR Fix
+
+            ⏱️ 타임아웃으로 작업이 취소되었습니다. [워크플로우 로그](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})를 확인하세요.
+
+            ---
+            > 🤖 *${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} CI · [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+          target: ${{ needs.parse-pr-fix.outputs.pr_number }}
+          type: pr
+          repository: ${{ github.repository }}
+
+# ════════════════════════════════════════════════════════════════
+#  TRIAGE (issue analysis with session persistence)
+# ════════════════════════════════════════════════════════════════
+
+  triage-cleanup:
+    name: Cleanup Session
+    if: inputs.mode == 'triage' && github.event_name == 'issues' && github.event.action == 'closed'
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    steps:
+      - name: Remove session file
+        shell: bash
+        run: |
+          REPO_DIR="$HOME/${{ inputs.agent }}-sessions/${{ github.repository }}"
+          rm -f "${REPO_DIR}/issue-${{ github.event.issue.number }}"
+          echo "::notice::Cleaned up ${{ inputs.agent }} session for ${{ github.repository }}#${{ github.event.issue.number }}"
+
+  triage:
+    name: Agent Issue Triage
+    if: >
+      inputs.mode == 'triage' &&
+      (
+        (github.event_name == 'issues' &&
+         (github.event.action == 'opened' || github.event.action == 'reopened') &&
+         contains(github.event.issue.title, inputs.title_keyword) &&
+         (inputs.auto_title_keyword == '' || !contains(github.event.issue.title, inputs.auto_title_keyword))) ||
+        (github.event_name == 'issue_comment' &&
+         !github.event.issue.pull_request &&
+         startsWith(github.event.comment.body, inputs.trigger_command) &&
+         github.event.comment.user.type != 'Bot' &&
+         github.event.sender.login != 'github-actions[bot]')
+      )
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    concurrency:
+      group: ${{ inputs.agent }}-issue-${{ github.repository }}-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+    steps:
+      - name: React with eyes (issue opened)
+        if: github.event_name == 'issues'
+        uses: youngrok-XCENA/relay/.github/actions/react-emoji@main
+        with:
+          url: ${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}
+          reaction: eyes
+          token: ${{ secrets.GH_PAT || github.token }}
+
+      - name: React with eyes (comment trigger)
+        if: github.event_name == 'issue_comment'
+        uses: youngrok-XCENA/relay/.github/actions/react-emoji@main
+        with:
+          url: ${{ github.event.comment.url }}
+          reaction: eyes
+          token: ${{ secrets.GH_PAT || github.token }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch || 'main' }}
+          fetch-depth: 1
+          token: ${{ secrets.GH_PAT || github.token }}
+
+      - name: Initialize submodules
+        shell: bash
+        run: git submodule update --init --recursive || { echo "::error::Submodule initialization failed"; exit 1; }
+
+      - name: Load session
+        id: session
+        shell: bash
+        run: |
+          SESSION_DIR="$HOME/${{ inputs.agent }}-sessions/${{ github.repository }}"
+          mkdir -p "$SESSION_DIR"
+          SESSION_FILE="${SESSION_DIR}/issue-${{ github.event.issue.number }}"
+
+          echo "session_file=${SESSION_FILE}" >> "$GITHUB_OUTPUT"
+
+          if [ -f "$SESSION_FILE" ]; then
+            SESSION_ID=$(cat "$SESSION_FILE")
+            if [ -z "$SESSION_ID" ]; then
+              echo "::warning::Session file exists but is empty, removing"
+              rm -f "$SESSION_FILE"
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "session_id=${SESSION_ID}" >> "$GITHUB_OUTPUT"
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::Found existing session ${SESSION_ID} for issue #${{ github.event.issue.number }}"
+            fi
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No existing session for issue #${{ github.event.issue.number }}"
+          fi
+
+      - name: Build prompt
+        id: prompt
+        shell: bash
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          COMMENT_BODY: ${{ github.event.comment.body || '' }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login || '' }}
+          PROJECT_DESCRIPTION: ${{ inputs.project_description }}
+          TRIGGER_COMMAND: ${{ inputs.trigger_command }}
+          SESSION_EXISTS: ${{ steps.session.outputs.exists }}
+        run: |
+          COMMENT_TEXT=$(printf "%s" "${COMMENT_BODY}" | sed "s|${TRIGGER_COMMAND}||" | xargs)
+
+          # --- Build resume prompt (when session exists + comment event) ---
+          if [ "$SESSION_EXISTS" = "true" ] && [ "${{ github.event_name }}" = "issue_comment" ] && [ -n "$COMMENT_TEXT" ]; then
+            RESUME_PROMPT="${COMMENT_AUTHOR} commented:
+          ${COMMENT_TEXT}
+
+          ## Instructions
+          - Continue the conversation naturally based on the comment above and your prior analysis.
+          - If the comment asks a question, answer it with specific code references.
+          - If the comment provides new information, update your analysis accordingly.
+          - Be concise and actionable.
+          - Reference specific file paths and function names from the codebase.
+          - Write in the same language as the comment.
+          - Return only the reply body text.
+          - Do not post comments or use GitHub tools for side effects, EXCEPT: if the user explicitly asks you to create a GitHub issue, use the gh CLI to create it and include the issue URL in your response.
+          - Do not describe tool/auth limitations.
+          - The workflow will post the response."
+
+            {
+              echo "resume_prompt<<GHEOF_RESUME"
+              echo "$RESUME_PROMPT"
+              echo "GHEOF_RESUME"
+              echo "has_resume=true"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "has_resume=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # --- Always build full prompt (for new sessions or resume fallback) ---
+          HISTORY=$(gh api "repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments" \
+            --paginate \
+            --jq '[.[] | "\(.user.login):\n\(.body // \"\")"] | join("\n\n---\n\n")' 2>/dev/null || echo "")
+
+          FULL_PROMPT="You are analyzing a GitHub issue for the ${PROJECT_DESCRIPTION} project.
+
+          ## Issue #${ISSUE_NUMBER}
+          **Title:** ${ISSUE_TITLE}
+
+          **Body:**
+          ${ISSUE_BODY}"
+
+          if [ -n "$HISTORY" ]; then
+            FULL_PROMPT="${FULL_PROMPT}
+
+          ## Conversation History
+          ${HISTORY}"
+          fi
+
+          if [ -n "$COMMENT_TEXT" ]; then
+            FULL_PROMPT="${FULL_PROMPT}
+
+          ## Latest Comment
+          ${COMMENT_AUTHOR}: ${COMMENT_TEXT}
+
+          ## Instructions
+          - Analyze the issue based on the issue body and comment history.
+          - If the latest comment asks a question, answer it with specific code references.
+          - If the latest comment provides new information, update your analysis accordingly.
+          - If the latest comment is just a trigger, provide a concise issue analysis.
+          - Be concise and actionable.
+          - Reference specific file paths and function names from the codebase.
+          - Write in the same language as the latest comment.
+          - Return only the reply body text.
+          - Do not post comments or use GitHub tools for side effects, EXCEPT: if the user explicitly asks you to create a GitHub issue, use the gh CLI to create it and include the issue URL in your response.
+          - Do not describe tool/auth limitations.
+          - The workflow will post the response."
+          else
+            FULL_PROMPT="${FULL_PROMPT}
+
+          ## Instructions
+          - This is a READ-ONLY analysis step. Do NOT modify, edit, or write any files. Do NOT run fix commands. Only read and analyze.
+          - Determine whether this issue is a bug report, an improvement request, or a general task.
+          - Identify which code modules and files are relevant.
+          - Assess the impact and scope.
+          - Suggest a concrete action plan (fix, refactor, or new implementation).
+          - If the issue lacks information, list what additional details are needed.
+          - Be concise and actionable.
+          - Do not include meta-commentary about your own process (e.g. "Let me compile the analysis").
+          - Start directly with the analysis content.
+          - Reference specific file paths and function names from the codebase.
+          - Return only the analysis body text.
+          - Do not post comments or use GitHub tools for side effects, EXCEPT: if the user explicitly asks you to create a GitHub issue, use the gh CLI to create it and include the issue URL in your response.
+          - Do not describe tool/auth limitations.
+          - The workflow will post the response."
+          fi
+
+          {
+            echo "full_prompt<<GHEOF_FULL"
+            echo "$FULL_PROMPT"
+            echo "GHEOF_FULL"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run agent
+        id: agent_run
+        uses: youngrok-XCENA/relay/.github/actions/run-agent@main
+        with:
+          agent: ${{ inputs.agent }}
+          node_path: ${{ inputs.node_path }}
+          codex_sandbox: ${{ inputs.codex_sandbox }}
+          prompt: ${{ steps.prompt.outputs.full_prompt }}
+          resume_prompt: ${{ steps.prompt.outputs.resume_prompt }}
+          model: ${{ inputs.model }}
+          max_turns: ${{ inputs.max_turns }}
+          output_format: json
+          resume_session: ${{ steps.prompt.outputs.has_resume }}
+          session_id: ${{ steps.session.outputs.session_id }}
+          session_file: ${{ steps.session.outputs.session_file }}
+
+      - name: Build triage comment
+        if: always()
+        id: comment
+        shell: bash
+        env:
+          RESULT: ${{ steps.agent_run.outputs.result }}
+          EXIT_CODE: ${{ steps.agent_run.outputs.exit_code }}
+          FAILURE_TYPE: ${{ steps.agent_run.outputs.failure_type }}
+        run: |
+          FOOTER="
+
+          ---
+          > 🤖 *${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} CI · [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          if [ "$EXIT_CODE" = "0" ] && [ -n "$RESULT" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Issue Analysis
+
+          ${RESULT}${FOOTER}"
+          elif [ "$FAILURE_TYPE" = "usage_limit" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Issue Analysis
+
+          ❌ Analysis could not run because the AI agent account appears to have reached its usage limit. Retry after the limit resets or more quota is available. Check [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).${FOOTER}"
+          elif [ "$FAILURE_TYPE" = "auth_error" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Issue Analysis
+
+          ❌ Analysis could not run due to an authentication error. The API token may be expired or invalid. Please check the relevant API key secret. Check [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).${FOOTER}"
+          else
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Issue Analysis
+
+          ❌ Analysis failed. Check [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).${FOOTER}"
+          fi
+
+          {
+            echo "body<<GHEOF"
+            echo "$BODY"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post triage comment
+        if: always()
+        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
+        with:
+          body: ${{ steps.comment.outputs.body }}
+          target: ${{ github.event.issue.number }}
+          type: issue
+          repository: ${{ github.repository }}
+
+      - name: React completion (comment trigger)
+        if: always() && github.event_name == 'issue_comment'
+        uses: youngrok-XCENA/relay/.github/actions/react-emoji@main
+        with:
+          url: ${{ github.event.comment.url }}
+          reaction: ${{ steps.agent_run.outputs.exit_code == '0' && 'rocket' || '-1' }}
+          token: ${{ secrets.GH_PAT || github.token }}
+
+  notify-triage-timeout:
+    name: Notify Triage Timeout
+    needs: [triage]
+    if: inputs.mode == 'triage' && cancelled()
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+    steps:
+      - name: Post timeout comment
+        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
+        with:
+          body: |
+            ### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Issue Analysis
+
+            ⏱️ Analysis timed out after ${{ inputs.timeout_minutes }} minutes. The self-hosted runner may be unavailable or under heavy load. Check [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) and retry.
+          target: ${{ github.event.issue.number }}
+          type: issue
+          repository: ${{ github.repository }}
+
+# ════════════════════════════════════════════════════════════════
+#  AUTO-PIPELINE (analysis → fix → PR → review → pr-fix → PR checks)
+# ════════════════════════════════════════════════════════════════
+
+  auto-pipeline:
+    name: Agent Auto Pipeline
+    if: >
+      inputs.mode == 'auto-pipeline' &&
+      github.event_name == 'issues' &&
+      (
+        ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+         (inputs.auto_title_keyword == '' || contains(github.event.issue.title, inputs.auto_title_keyword))) ||
+        (github.event.action == 'labeled' &&
+         github.event.label.name == inputs.trigger_label)
+      )
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    concurrency:
+      group: ${{ inputs.agent }}-auto-pipeline-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+    steps:
+
+      # ── Stage 0: Start ──────────────────────────────────────────────
+      - name: React with eyes
+        uses: youngrok-XCENA/relay/.github/actions/react-emoji@main
+        with:
+          url: ${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}
+          reaction: eyes
+          token: ${{ secrets.GH_PAT || github.token }}
+
+      - name: Post start comment
+        run: |
+          BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Auto Pipeline
+
+          🚀 자동 파이프라인을 시작합니다.
+
+          | 단계 | 상태 |
+          |------|------|
+          | 1. 이슈 분석 | ⏳ 진행 중 |
+          | 2. 코드 패치 | ⬜ 대기 |
+          | 3. PR 생성 | ⬜ 대기 |
+          | 4. 코드 리뷰 | ⬜ 대기 |
+          | 5. 리뷰 반영 | ⬜ 대기 |
+          | 6. PR checks 확인 | ⬜ 대기 |
+          | 7. checks 실패 반영 | ⬜ 대기 |
+
+          ---
+          > 🤖 *${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} CI · [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          gh issue comment "${{ github.event.issue.number }}" \
+            --repo "${{ github.repository }}" \
+            --body "$BODY"
+
+      # ── Stage 1: Fix ─────────────────────────────────────────────────
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || github.token }}
+
+      - name: Create fix branch
+        id: branch
+        shell: bash
+        env:
+          BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+        run: |
+          BRANCH="${BRANCH_PREFIX}${{ github.event.issue.number }}"
+          git push origin --delete "$BRANCH" 2>/dev/null || true
+          git checkout -b "$BRANCH"
+          echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Initialize submodules
+        shell: bash
+        run: git submodule update --init --recursive || { echo "::error::Submodule initialization failed"; exit 1; }
+
+      - name: Analyze issue
+        id: analysis
+        uses: youngrok-XCENA/relay/.github/actions/run-agent@main
+        with:
+          agent: ${{ inputs.agent }}
+          node_path: ${{ inputs.node_path }}
+          codex_sandbox: ${{ inputs.codex_sandbox }}
+          prompt: |
+            You are analyzing a GitHub issue for the ${{ inputs.project_description }} project.
+
+            ## Issue #${{ github.event.issue.number }}
+            **Title:** ${{ github.event.issue.title }}
+
+            **Body:**
+            ${{ github.event.issue.body }}
+
+            ## Task
+            Determine whether this issue is a bug report, an improvement request, or a general task. Then provide a concise technical analysis:
+            - **Type**: Bug / Improvement / Task
+            - **Scope**: Which files/components are affected?
+            - **Action Plan**: Concrete steps to address this issue (fix, refactor, or new implementation).
+            - **Risks**: Any potential side effects?
+
+            ## Rules
+            - This is a READ-ONLY analysis step. Do NOT modify, edit, or write any files. Do NOT run fix commands. Only read and analyze.
+            - Be concise and specific.
+            - Do not include meta-commentary about your own process (e.g. "Let me compile the analysis").
+            - Start directly with the analysis content (Type, Scope, Action Plan, Risks).
+            - Do not post issue comments, create PRs, or use GitHub tools for side effects.
+            - Do not describe tool/auth limitations in the final response.
+            - Return only the analysis body text.
+          model: ${{ inputs.model }}
+          max_turns: 15
+
+      - name: Post analysis comment
+        if: steps.analysis.outputs.exit_code == '0' && steps.analysis.outputs.result != ''
+        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
+        with:
+          body: |
+            ### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} 이슈 분석 (Auto Pipeline)
+
+            ${{ steps.analysis.outputs.result }}
+
+            ---
+            > 🤖 *${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} CI · [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+          target: ${{ github.event.issue.number }}
+          type: issue
+          repository: ${{ github.repository }}
+
+      - name: Collect issue context
+        id: context
+        shell: bash
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PROJECT_DESCRIPTION: ${{ inputs.project_description }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
+          TEST_COMMAND: ${{ inputs.test_command }}
+          FORMAT_COMMAND: ${{ inputs.format_command }}
+          CODE_STYLE_GUIDE: ${{ inputs.code_style_guide }}
+          ANALYSIS_RESULT: ${{ steps.analysis.outputs.result }}
+          PR_TEMPLATE: ${{ inputs.pr_template }}
+        run: |
+          COMMENTS=$(gh api "repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments" \
+            --paginate \
+            --jq '[.[] | select((.body | startswith("### Claude")) or (.body | startswith("### Codex"))) | .body] | join("\n\n---\n\n")' 2>/dev/null || echo "")
+
+          # Read PR template from the repository if not provided via input
+          TMPL="$PR_TEMPLATE"
+          if [ -z "$TMPL" ]; then
+            for f in .github/pull_request_template.md .github/PULL_REQUEST_TEMPLATE.md; do
+              if [ -f "$f" ]; then
+                TMPL=$(cat "$f")
+                break
+              fi
+            done
+          fi
+
+          PROMPT="You are fixing a GitHub issue for the ${PROJECT_DESCRIPTION} project.
+
+          ## Issue #${ISSUE_NUMBER}
+          **Title:** ${ISSUE_TITLE}
+
+          **Body:**
+          ${ISSUE_BODY}"
+
+          if [ -n "$ANALYSIS_RESULT" ]; then
+            PROMPT="${PROMPT}
+
+          ## Issue Analysis
+          ${ANALYSIS_RESULT}"
+          elif [ -n "$COMMENTS" ]; then
+            PROMPT="${PROMPT}
+
+          ## Previous Analysis
+          ${COMMENTS}"
+          fi
+
+          PROMPT="${PROMPT}
+
+          ## Rules
+          - Fix only the issue described above. Do not refactor unrelated code.
+          - Follow this code style guide: ${CODE_STYLE_GUIDE}
+          - Build and verify with: ${BUILD_COMMAND}
+          - Run relevant tests if possible with: ${TEST_COMMAND}
+          - If format_command is non-empty, run it on changed files after the fix: ${FORMAT_COMMAND}
+          - If you add new functionality, write tests for it.
+          - Do not modify files outside the scope of this issue.
+          - Do not post issue comments, create PRs, or use GitHub tools for side effects.
+          - Do not describe tool/auth limitations in the final response."
+
+          PROMPT="${PROMPT}
+
+          ## CRITICAL: Output Format
+          Your response will be used directly as the PR body. You MUST:
+          1. Output NOTHING before the first section header. No preamble, no status messages.
+          2. Start with these sections in this exact order:
+
+          ### Why
+          Explain why this change is needed. What problem exists if this is not applied?
+
+          ### Design changes (optional)
+          If there are structural changes (e.g. call flow, module boundaries, data flow), include a mermaid diagram. Skip this section if the change is simple (config, typo, single-function edit)."
+
+          if [ -n "$TMPL" ]; then
+            PROMPT="${PROMPT}
+
+          3. After the above sections, fill in the following PR template. Keep every section header, replace HTML comments with actual content. Leave optional sections with just a dash (-) if not applicable.
+
+          ${TMPL}"
+          fi
+
+          {
+            echo "prompt<<GHEOF"
+            echo "$PROMPT"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run agent fix
+        id: fix
+        uses: youngrok-XCENA/relay/.github/actions/run-agent@main
+        with:
+          agent: ${{ inputs.agent }}
+          node_path: ${{ inputs.node_path }}
+          codex_sandbox: ${{ inputs.codex_sandbox }}
+          prompt: ${{ steps.context.outputs.prompt }}
+          model: ${{ inputs.model }}
+          max_turns: ${{ inputs.max_turns }}
+
+      - name: Format changed files
+        if: steps.fix.outputs.exit_code == '0' && inputs.format_command != ''
+        shell: bash
+        env:
+          FORMAT_COMMAND: ${{ inputs.format_command }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          mapfile -t changed_files < <(git diff --name-only "${BASE_BRANCH}...HEAD")
+          if [ ${#changed_files[@]} -eq 0 ]; then
+            exit 0
+          fi
+
+          read -r -a formatter <<< "$FORMAT_COMMAND"
+          "${formatter[@]}" "${changed_files[@]}"
+
+      - name: Commit and push
+        if: steps.fix.outputs.exit_code == '0'
+        id: push
+        shell: bash
+        env:
+          BOT_USER: ${{ inputs.bot_user }}
+          BOT_EMAIL: ${{ inputs.bot_email }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          git config user.name "$BOT_USER"
+          git config user.email "$BOT_EMAIL"
+
+          git add -A
+          if [ -n "$(git diff --cached --name-only)" ]; then
+            git commit -m "fix: address issue #${{ github.event.issue.number }}"
+          fi
+
+          if [ -z "$(git log "${BASE_BRANCH}"..HEAD --oneline)" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          git push origin "${{ steps.branch.outputs.name }}" 2>&1
+
+      # ── Stage 2: Create PR ───────────────────────────────────────────
+      - name: Create PR
+        if: steps.fix.outputs.exit_code == '0' && steps.push.outputs.has_changes == 'true'
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+          RESULT: ${{ steps.fix.outputs.result }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          BRANCH_NAME: ${{ steps.branch.outputs.name }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          EXISTING=$(gh pr list --repo "${{ github.repository }}" --head "${BRANCH_NAME}" --json url,number --jq '.[0] // empty')
+          if [ -n "$EXISTING" ]; then
+            echo "url=$(echo "$EXISTING" | jq -r '.url')" >> "$GITHUB_OUTPUT"
+            echo "number=$(echo "$EXISTING" | jq -r '.number')" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Strip any preamble text before the first markdown heading
+          CLEAN_RESULT=$(echo "${RESULT}" | sed -n '/^#/,$p' | head -c 60000)
+          if [ -z "$CLEAN_RESULT" ]; then
+            CLEAN_RESULT=$(echo "${RESULT}" | head -c 60000)
+          fi
+
+          PR_BODY_FILE=$(mktemp)
+          {
+            echo "$CLEAN_RESULT"
+            echo ""
+            echo ""
+            echo "Closes #${ISSUE_NUMBER}"
+          } > "$PR_BODY_FILE"
+
+          PR_URL=$(gh pr create \
+            --repo "${{ github.repository }}" \
+            --head "${BRANCH_NAME}" \
+            --base "${BASE_BRANCH}" \
+            --title "fix: ${ISSUE_TITLE}" \
+            --body-file "$PR_BODY_FILE" 2>&1 | grep -o 'https://.*' || true)
+
+          rm -f "$PR_BODY_FILE"
+
+          if [ -z "$PR_URL" ]; then
+            PR_URL=$(gh pr list --repo "${{ github.repository }}" --head "${BRANCH_NAME}" --json url --jq '.[0].url // empty')
+          fi
+
+          PR_NUMBER=$(gh pr list --repo "${{ github.repository }}" --head "${BRANCH_NAME}" --json number --jq '.[0].number // empty')
+
+          echo "url=${PR_URL}" >> "$GITHUB_OUTPUT"
+          echo "number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      # ── Stage 3: Review ──────────────────────────────────────────────
+      - name: Get diff for review
+        if: steps.push.outputs.has_changes == 'true' && steps.pr.outputs.number != ''
+        id: diff
+        shell: bash
+        env:
+          FILE_EXTENSIONS: ${{ inputs.file_extensions }}
+          MAX_DIFF_SIZE: ${{ inputs.max_diff_size }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          read -r -a patterns <<< "$FILE_EXTENSIONS"
+          DIFF=$(git diff "origin/${BASE_BRANCH}...HEAD" -- "${patterns[@]}" | head -c "$MAX_DIFF_SIZE")
+          {
+            echo "diff<<GHEOF"
+            echo "$DIFF"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run agent review
+        if: steps.push.outputs.has_changes == 'true' && steps.pr.outputs.number != ''
+        id: review
+        uses: youngrok-XCENA/relay/.github/actions/run-agent@main
+        with:
+          agent: ${{ inputs.agent }}
+          node_path: ${{ inputs.node_path }}
+          codex_sandbox: ${{ inputs.codex_sandbox }}
+          prompt: |
+            You are reviewing a pull request for the ${{ inputs.project_description }} project.
+
+            ## Review Guidelines
+            - Focus on: ${{ inputs.review_focus }}
+            - Code style: ${{ inputs.code_style_guide }}
+            - Classify issues as CRITICAL / HIGH / MEDIUM / LOW
+            - Be specific with file paths and line numbers
+            - Be concise. Skip praise, go straight to issues.
+            - Return only the review comment body text
+            - Do not post comments, reviews, or use GitHub tools
+            - Do not describe tool/auth limitations
+            - The workflow will post the review
+
+            ## PR Diff
+            ```diff
+            ${{ steps.diff.outputs.diff }}
+            ```
+          model: ${{ inputs.model }}
+          max_turns: ${{ inputs.max_review_turns }}
+
+      - name: Post review on PR
+        if: steps.review.outputs.exit_code == '0' && steps.review.outputs.result != ''
+        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
+        with:
+          body: |
+            ### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Review (Auto Pipeline)
+
+            ${{ steps.review.outputs.result }}
+
+            ---
+            > 🤖 *${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} CI · [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+          target: ${{ steps.pr.outputs.number }}
+          type: pr
+          repository: ${{ github.repository }}
+
+      # ── Stage 4: PR Fix ──────────────────────────────────────────────
+      - name: Check if fix needed
+        if: steps.review.outputs.exit_code == '0'
+        id: review_check
+        shell: bash
+        env:
+          REVIEW_RESULT: ${{ steps.review.outputs.result }}
+        run: |
+          if printf "%s" "$REVIEW_RESULT" | grep -Eq 'CRITICAL|HIGH'; then
+            echo "needs_fix=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_fix=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record initial HEAD for PR fix
+        id: prfix_initial_head
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Run agent PR fix
+        if: steps.review_check.outputs.needs_fix == 'true'
+        id: prfix
+        uses: youngrok-XCENA/relay/.github/actions/run-agent@main
+        with:
+          agent: ${{ inputs.agent }}
+          node_path: ${{ inputs.node_path }}
+          codex_sandbox: ${{ inputs.codex_sandbox }}
+          prompt: |
+            You are patching an existing pull request for the ${{ inputs.project_description }} project.
+
+            ## PR #${{ steps.pr.outputs.number }}
+            **Branch:** ${{ steps.branch.outputs.name }} -> ${{ inputs.base_branch }}
+
+            ## Code Review Feedback
+            ${{ steps.review.outputs.result }}
+
+            ## Current Diff
+            ```diff
+            ${{ steps.diff.outputs.diff }}
+            ```
+
+            ## Rules
+            - Address the CRITICAL and HIGH issues from the review above.
+            - Follow this code style guide: ${{ inputs.code_style_guide }}
+            - Build and verify with: ${{ inputs.build_command }}
+            - Run relevant tests if possible with: ${{ inputs.test_command }}
+            - If format_command is non-empty, run it on changed files after the fix: ${{ inputs.format_command }}
+            - Do not modify files outside the scope of the requested changes.
+            - Do not post issue comments, create PRs, or use GitHub tools for side effects.
+            - Do not describe tool/auth limitations in the final response.
+            - End your response with a section titled "### 리뷰 반영 결과" containing a markdown table
+              that lists each CRITICAL/HIGH issue from the review and whether it was addressed.
+              Use ✅ 수정됨 if fixed, ⚠️ 미반영 with a brief reason if not. Example format:
+              ### 리뷰 반영 결과
+              | 항목 | 반영 |
+              |------|------|
+              | SHA 인젝션 가능성 (line 43) | ✅ 수정됨 |
+              | 미처리 에러 케이스 (line 87) | ⚠️ 미반영 — 해당 경로 도달 불가 |
+          model: ${{ inputs.model }}
+          max_turns: ${{ inputs.max_turns }}
+
+      - name: Format PR fix changes
+        if: steps.prfix.outputs.exit_code == '0' && inputs.format_command != ''
+        shell: bash
+        env:
+          FORMAT_COMMAND: ${{ inputs.format_command }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          mapfile -t changed_files < <(git diff --name-only "origin/${BASE_BRANCH}...HEAD")
+          if [ ${#changed_files[@]} -eq 0 ]; then
+            exit 0
+          fi
+
+          read -r -a formatter <<< "$FORMAT_COMMAND"
+          "${formatter[@]}" "${changed_files[@]}"
+
+      - name: Commit and push PR fix
+        if: steps.prfix.outputs.exit_code == '0'
+        id: prfix_push
+        shell: bash
+        env:
+          BOT_USER: ${{ inputs.bot_user }}
+          BOT_EMAIL: ${{ inputs.bot_email }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          INITIAL_SHA: ${{ steps.prfix_initial_head.outputs.sha }}
+        run: |
+          git config user.name "$BOT_USER"
+          git config user.email "$BOT_EMAIL"
+
+          git add -A
+          if [ -n "$(git diff --cached --name-only)" ]; then
+            git commit -m "fix: address review feedback on PR #${PR_NUMBER}"
+          fi
+
+          if [ "$(git rev-parse HEAD)" = "$INITIAL_SHA" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          BRANCH_NAME="${{ steps.branch.outputs.name }}"
+          if [ -n "$(git log "origin/${BRANCH_NAME}"..HEAD --oneline 2>/dev/null)" ]; then
+            git push origin "$BRANCH_NAME" 2>&1
+          fi
+
+      - name: Post PR fix comment
+        if: steps.prfix_push.outputs.has_changes == 'true'
+        shell: bash
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          PRFIX_RESULT: ${{ steps.prfix.outputs.result }}
+        run: |
+          CLEAN=$(echo "$PRFIX_RESULT" | sed -n '/^#/,$p')
+          if [ -z "$CLEAN" ]; then
+            CLEAN="$PRFIX_RESULT"
+          fi
+          gh pr comment "$PR_NUMBER" \
+            --repo "${{ github.repository }}" \
+            --body "$CLEAN"
+
+      - name: Normalize checks fix attempts
+        if: steps.push.outputs.has_changes == 'true' && steps.pr.outputs.number != ''
+        id: checks_attempts
+        shell: bash
+        env:
+          INPUT_ATTEMPTS: ${{ inputs.max_check_fix_attempts }}
+        run: |
+          attempts="${INPUT_ATTEMPTS:-1}"
+          if ! [[ "$attempts" =~ ^-?[0-9]+$ ]]; then
+            attempts=1
+          fi
+
+          if [ "$attempts" -lt 0 ]; then
+            attempts=0
+          fi
+          if [ "$attempts" -gt 3 ]; then
+            attempts=3
+          fi
+
+          echo "value=$attempts" >> "$GITHUB_OUTPUT"
+
+          if [ "$attempts" -ge 1 ]; then echo "allow_attempt_1=true" >> "$GITHUB_OUTPUT"; else echo "allow_attempt_1=false" >> "$GITHUB_OUTPUT"; fi
+          if [ "$attempts" -ge 2 ]; then echo "allow_attempt_2=true" >> "$GITHUB_OUTPUT"; else echo "allow_attempt_2=false" >> "$GITHUB_OUTPUT"; fi
+          if [ "$attempts" -ge 3 ]; then echo "allow_attempt_3=true" >> "$GITHUB_OUTPUT"; else echo "allow_attempt_3=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Refresh diff for PR checks
+        if: steps.push.outputs.has_changes == 'true' && steps.pr.outputs.number != ''
+        id: current_diff
+        shell: bash
+        env:
+          FILE_EXTENSIONS: ${{ inputs.file_extensions }}
+          MAX_DIFF_SIZE: ${{ inputs.max_diff_size }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          read -r -a patterns <<< "$FILE_EXTENSIONS"
+          DIFF=$(git diff "origin/${BASE_BRANCH}...HEAD" -- "${patterns[@]}" | head -c "$MAX_DIFF_SIZE")
+          {
+            echo "diff<<GHEOF"
+            echo "$DIFF"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Wait for PR checks
+        if: steps.push.outputs.has_changes == 'true' && steps.pr.outputs.number != ''
+        id: pr_checks
+        uses: youngrok-XCENA/relay/.github/actions/collect-pr-checks@main
+        with:
+          repository: ${{ github.repository }}
+          pr_number: ${{ steps.pr.outputs.number }}
+          max_wait_minutes: ${{ inputs.check_wait_minutes }}
+          poll_interval_seconds: ${{ inputs.check_poll_interval_seconds }}
+
+      - name: Record initial HEAD for checks fix attempt 1
+        if: steps.pr_checks.outputs.status == 'failed' && steps.checks_attempts.outputs.allow_attempt_1 == 'true'
+        id: cifix_initial_head
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Run agent checks fix attempt 1
+        if: steps.pr_checks.outputs.status == 'failed' && steps.checks_attempts.outputs.allow_attempt_1 == 'true'
+        id: cifix
+        uses: youngrok-XCENA/relay/.github/actions/run-agent@main
+        with:
+          agent: ${{ inputs.agent }}
+          node_path: ${{ inputs.node_path }}
+          codex_sandbox: ${{ inputs.codex_sandbox }}
+          prompt: |
+            You are fixing failing pull request checks for the ${{ inputs.project_description }} project.
+
+            ## PR #${{ steps.pr.outputs.number }}
+            **Branch:** ${{ steps.branch.outputs.name }} -> ${{ inputs.base_branch }}
+            **Attempt:** 1 / ${{ steps.checks_attempts.outputs.value }}
+
+            ## Failing PR Checks
+            ${{ steps.pr_checks.outputs.summary }}
+
+            ## Current Diff
+            ```diff
+            ${{ steps.current_diff.outputs.diff }}
+            ```
+
+            ## Rules
+            - Make the failing PR checks pass on the current branch.
+            - The check output above is the source of truth, even if it differs from build_command or test_command.
+            - Prefer the smallest safe change that fixes the reported failure.
+            - If the failure looks flaky or external to the repository, explain that instead of making risky code changes.
+            - Follow this code style guide: ${{ inputs.code_style_guide }}
+            - Build and verify with: ${{ inputs.build_command }}
+            - Run relevant tests if possible with: ${{ inputs.test_command }}
+            - If format_command is non-empty, run it on changed files after the fix: ${{ inputs.format_command }}
+            - Do not modify files outside the scope of the requested changes.
+            - Do not post issue comments, create PRs, or use GitHub tools for side effects.
+            - Do not describe tool/auth limitations in the final response.
+            - End your response with a section titled "### checks 반영 결과" containing a markdown table
+              that lists each failing PR check and whether it was addressed.
+              Use ✅ 수정됨 if fixed, ⚠️ 미반영 with a brief reason if not.
+          model: ${{ inputs.model }}
+          max_turns: ${{ inputs.max_prfix_turns }}
+
+      - name: Format checks fix changes attempt 1
+        if: steps.cifix.outputs.exit_code == '0' && inputs.format_command != ''
+        shell: bash
+        env:
+          FORMAT_COMMAND: ${{ inputs.format_command }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          mapfile -t changed_files < <(git diff --name-only "origin/${BASE_BRANCH}...HEAD")
+          if [ ${#changed_files[@]} -eq 0 ]; then
+            exit 0
+          fi
+
+          read -r -a formatter <<< "$FORMAT_COMMAND"
+          "${formatter[@]}" "${changed_files[@]}"
+
+      - name: Commit and push checks fix attempt 1
+        if: steps.cifix.outcome == 'success' && steps.cifix.outputs.exit_code == '0'
+        id: cifix_push
+        shell: bash
+        env:
+          BOT_USER: ${{ inputs.bot_user }}
+          BOT_EMAIL: ${{ inputs.bot_email }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          INITIAL_SHA: ${{ steps.cifix_initial_head.outputs.sha }}
+        run: |
+          git config user.name "$BOT_USER"
+          git config user.email "$BOT_EMAIL"
+
+          git add -A
+          if [ -n "$(git diff --cached --name-only)" ]; then
+            git commit -m "fix: address failing PR checks on PR #${PR_NUMBER}"
+          fi
+
+          if [ "$(git rev-parse HEAD)" = "$INITIAL_SHA" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          BRANCH_NAME="${{ steps.branch.outputs.name }}"
+          if [ -n "$(git log "origin/${BRANCH_NAME}"..HEAD --oneline 2>/dev/null)" ]; then
+            git push origin "$BRANCH_NAME" 2>&1
+          fi
+
+      - name: Post checks fix comment attempt 1
+        if: steps.cifix_push.outputs.has_changes == 'true'
+        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
+        with:
+          body: |
+            ### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} PR Checks Fix (Attempt 1)
+
+            ${{ steps.cifix.outputs.result }}
+
+            ---
+            > 🤖 *${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} CI · [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+          target: ${{ steps.pr.outputs.number }}
+          type: pr
+          repository: ${{ github.repository }}
+
+      - name: Wait for PR checks after checks fix attempt 1
+        if: steps.cifix_push.outputs.has_changes == 'true'
+        id: pr_checks_after_fix
+        uses: youngrok-XCENA/relay/.github/actions/collect-pr-checks@main
+        with:
+          repository: ${{ github.repository }}
+          pr_number: ${{ steps.pr.outputs.number }}
+          max_wait_minutes: ${{ inputs.check_wait_minutes }}
+          poll_interval_seconds: ${{ inputs.check_poll_interval_seconds }}
+
+      - name: Refresh diff for PR checks fix attempt 2
+        if: steps.pr_checks_after_fix.outputs.status == 'failed' && steps.checks_attempts.outputs.allow_attempt_2 == 'true'
+        id: current_diff_attempt_2
+        shell: bash
+        env:
+          FILE_EXTENSIONS: ${{ inputs.file_extensions }}
+          MAX_DIFF_SIZE: ${{ inputs.max_diff_size }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          read -r -a patterns <<< "$FILE_EXTENSIONS"
+          DIFF=$(git diff "origin/${BASE_BRANCH}...HEAD" -- "${patterns[@]}" | head -c "$MAX_DIFF_SIZE")
+          {
+            echo "diff<<GHEOF"
+            echo "$DIFF"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Record initial HEAD for checks fix attempt 2
+        if: steps.pr_checks_after_fix.outputs.status == 'failed' && steps.checks_attempts.outputs.allow_attempt_2 == 'true'
+        id: cifix_2_initial_head
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Run agent checks fix attempt 2
+        if: steps.pr_checks_after_fix.outputs.status == 'failed' && steps.checks_attempts.outputs.allow_attempt_2 == 'true'
+        id: cifix_2
+        uses: youngrok-XCENA/relay/.github/actions/run-agent@main
+        with:
+          agent: ${{ inputs.agent }}
+          node_path: ${{ inputs.node_path }}
+          codex_sandbox: ${{ inputs.codex_sandbox }}
+          prompt: |
+            You are fixing failing pull request checks for the ${{ inputs.project_description }} project.
+
+            ## PR #${{ steps.pr.outputs.number }}
+            **Branch:** ${{ steps.branch.outputs.name }} -> ${{ inputs.base_branch }}
+            **Attempt:** 2 / ${{ steps.checks_attempts.outputs.value }}
+
+            ## Failing PR Checks
+            ${{ steps.pr_checks_after_fix.outputs.summary }}
+
+            ## Current Diff
+            ```diff
+            ${{ steps.current_diff_attempt_2.outputs.diff }}
+            ```
+
+            ## Rules
+            - Make the failing PR checks pass on the current branch.
+            - The check output above is the source of truth, even if it differs from build_command or test_command.
+            - Prefer the smallest safe change that fixes the reported failure.
+            - If the failure looks flaky or external to the repository, explain that instead of making risky code changes.
+            - Follow this code style guide: ${{ inputs.code_style_guide }}
+            - Build and verify with: ${{ inputs.build_command }}
+            - Run relevant tests if possible with: ${{ inputs.test_command }}
+            - If format_command is non-empty, run it on changed files after the fix: ${{ inputs.format_command }}
+            - Do not modify files outside the scope of the requested changes.
+            - Do not post issue comments, create PRs, or use GitHub tools for side effects.
+            - Do not describe tool/auth limitations in the final response.
+            - End your response with a section titled "### checks 반영 결과" containing a markdown table
+              that lists each failing PR check and whether it was addressed.
+              Use ✅ 수정됨 if fixed, ⚠️ 미반영 with a brief reason if not.
+          model: ${{ inputs.model }}
+          max_turns: ${{ inputs.max_prfix_turns }}
+
+      - name: Format checks fix changes attempt 2
+        if: steps.cifix_2.outputs.exit_code == '0' && inputs.format_command != ''
+        shell: bash
+        env:
+          FORMAT_COMMAND: ${{ inputs.format_command }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          mapfile -t changed_files < <(git diff --name-only "origin/${BASE_BRANCH}...HEAD")
+          if [ ${#changed_files[@]} -eq 0 ]; then
+            exit 0
+          fi
+
+          read -r -a formatter <<< "$FORMAT_COMMAND"
+          "${formatter[@]}" "${changed_files[@]}"
+
+      - name: Commit and push checks fix attempt 2
+        if: steps.cifix_2.outcome == 'success' && steps.cifix_2.outputs.exit_code == '0'
+        id: cifix_2_push
+        shell: bash
+        env:
+          BOT_USER: ${{ inputs.bot_user }}
+          BOT_EMAIL: ${{ inputs.bot_email }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          INITIAL_SHA: ${{ steps.cifix_2_initial_head.outputs.sha }}
+        run: |
+          git config user.name "$BOT_USER"
+          git config user.email "$BOT_EMAIL"
+
+          git add -A
+          if [ -n "$(git diff --cached --name-only)" ]; then
+            git commit -m "fix: address failing PR checks on PR #${PR_NUMBER} (attempt 2)"
+          fi
+
+          if [ "$(git rev-parse HEAD)" = "$INITIAL_SHA" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          BRANCH_NAME="${{ steps.branch.outputs.name }}"
+          if [ -n "$(git log "origin/${BRANCH_NAME}"..HEAD --oneline 2>/dev/null)" ]; then
+            git push origin "$BRANCH_NAME" 2>&1
+          fi
+
+      - name: Post checks fix comment attempt 2
+        if: steps.cifix_2_push.outputs.has_changes == 'true'
+        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
+        with:
+          body: |
+            ### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} PR Checks Fix (Attempt 2)
+
+            ${{ steps.cifix_2.outputs.result }}
+
+            ---
+            > 🤖 *${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} CI · [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+          target: ${{ steps.pr.outputs.number }}
+          type: pr
+          repository: ${{ github.repository }}
+
+      - name: Wait for PR checks after checks fix attempt 2
+        if: steps.cifix_2_push.outputs.has_changes == 'true'
+        id: pr_checks_after_fix_2
+        uses: youngrok-XCENA/relay/.github/actions/collect-pr-checks@main
+        with:
+          repository: ${{ github.repository }}
+          pr_number: ${{ steps.pr.outputs.number }}
+          max_wait_minutes: ${{ inputs.check_wait_minutes }}
+          poll_interval_seconds: ${{ inputs.check_poll_interval_seconds }}
+
+      - name: Refresh diff for PR checks fix attempt 3
+        if: steps.pr_checks_after_fix_2.outputs.status == 'failed' && steps.checks_attempts.outputs.allow_attempt_3 == 'true'
+        id: current_diff_attempt_3
+        shell: bash
+        env:
+          FILE_EXTENSIONS: ${{ inputs.file_extensions }}
+          MAX_DIFF_SIZE: ${{ inputs.max_diff_size }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          read -r -a patterns <<< "$FILE_EXTENSIONS"
+          DIFF=$(git diff "origin/${BASE_BRANCH}...HEAD" -- "${patterns[@]}" | head -c "$MAX_DIFF_SIZE")
+          {
+            echo "diff<<GHEOF"
+            echo "$DIFF"
+            echo "GHEOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Record initial HEAD for checks fix attempt 3
+        if: steps.pr_checks_after_fix_2.outputs.status == 'failed' && steps.checks_attempts.outputs.allow_attempt_3 == 'true'
+        id: cifix_3_initial_head
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Run agent checks fix attempt 3
+        if: steps.pr_checks_after_fix_2.outputs.status == 'failed' && steps.checks_attempts.outputs.allow_attempt_3 == 'true'
+        id: cifix_3
+        uses: youngrok-XCENA/relay/.github/actions/run-agent@main
+        with:
+          agent: ${{ inputs.agent }}
+          node_path: ${{ inputs.node_path }}
+          codex_sandbox: ${{ inputs.codex_sandbox }}
+          prompt: |
+            You are fixing failing pull request checks for the ${{ inputs.project_description }} project.
+
+            ## PR #${{ steps.pr.outputs.number }}
+            **Branch:** ${{ steps.branch.outputs.name }} -> ${{ inputs.base_branch }}
+            **Attempt:** 3 / ${{ steps.checks_attempts.outputs.value }}
+
+            ## Failing PR Checks
+            ${{ steps.pr_checks_after_fix_2.outputs.summary }}
+
+            ## Current Diff
+            ```diff
+            ${{ steps.current_diff_attempt_3.outputs.diff }}
+            ```
+
+            ## Rules
+            - Make the failing PR checks pass on the current branch.
+            - The check output above is the source of truth, even if it differs from build_command or test_command.
+            - Prefer the smallest safe change that fixes the reported failure.
+            - If the failure looks flaky or external to the repository, explain that instead of making risky code changes.
+            - Follow this code style guide: ${{ inputs.code_style_guide }}
+            - Build and verify with: ${{ inputs.build_command }}
+            - Run relevant tests if possible with: ${{ inputs.test_command }}
+            - If format_command is non-empty, run it on changed files after the fix: ${{ inputs.format_command }}
+            - Do not modify files outside the scope of the requested changes.
+            - Do not post issue comments, create PRs, or use GitHub tools for side effects.
+            - Do not describe tool/auth limitations in the final response.
+            - End your response with a section titled "### checks 반영 결과" containing a markdown table
+              that lists each failing PR check and whether it was addressed.
+              Use ✅ 수정됨 if fixed, ⚠️ 미반영 with a brief reason if not.
+          model: ${{ inputs.model }}
+          max_turns: ${{ inputs.max_prfix_turns }}
+
+      - name: Format checks fix changes attempt 3
+        if: steps.cifix_3.outputs.exit_code == '0' && inputs.format_command != ''
+        shell: bash
+        env:
+          FORMAT_COMMAND: ${{ inputs.format_command }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+        run: |
+          mapfile -t changed_files < <(git diff --name-only "origin/${BASE_BRANCH}...HEAD")
+          if [ ${#changed_files[@]} -eq 0 ]; then
+            exit 0
+          fi
+
+          read -r -a formatter <<< "$FORMAT_COMMAND"
+          "${formatter[@]}" "${changed_files[@]}"
+
+      - name: Commit and push checks fix attempt 3
+        if: steps.cifix_3.outcome == 'success' && steps.cifix_3.outputs.exit_code == '0'
+        id: cifix_3_push
+        shell: bash
+        env:
+          BOT_USER: ${{ inputs.bot_user }}
+          BOT_EMAIL: ${{ inputs.bot_email }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          INITIAL_SHA: ${{ steps.cifix_3_initial_head.outputs.sha }}
+        run: |
+          git config user.name "$BOT_USER"
+          git config user.email "$BOT_EMAIL"
+
+          git add -A
+          if [ -n "$(git diff --cached --name-only)" ]; then
+            git commit -m "fix: address failing PR checks on PR #${PR_NUMBER} (attempt 3)"
+          fi
+
+          if [ "$(git rev-parse HEAD)" = "$INITIAL_SHA" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          BRANCH_NAME="${{ steps.branch.outputs.name }}"
+          if [ -n "$(git log "origin/${BRANCH_NAME}"..HEAD --oneline 2>/dev/null)" ]; then
+            git push origin "$BRANCH_NAME" 2>&1
+          fi
+
+      - name: Post checks fix comment attempt 3
+        if: steps.cifix_3_push.outputs.has_changes == 'true'
+        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
+        with:
+          body: |
+            ### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} PR Checks Fix (Attempt 3)
+
+            ${{ steps.cifix_3.outputs.result }}
+
+            ---
+            > 🤖 *${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} CI · [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+          target: ${{ steps.pr.outputs.number }}
+          type: pr
+          repository: ${{ github.repository }}
+
+      - name: Wait for PR checks after checks fix attempt 3
+        if: steps.cifix_3_push.outputs.has_changes == 'true'
+        id: pr_checks_after_fix_3
+        uses: youngrok-XCENA/relay/.github/actions/collect-pr-checks@main
+        with:
+          repository: ${{ github.repository }}
+          pr_number: ${{ steps.pr.outputs.number }}
+          max_wait_minutes: ${{ inputs.check_wait_minutes }}
+          poll_interval_seconds: ${{ inputs.check_poll_interval_seconds }}
+
+      # ── Final Status ─────────────────────────────────────────────────
+      - name: Post final status
+        if: always()
+        shell: bash
+        env:
+          ANALYSIS_EXIT: ${{ steps.analysis.outputs.exit_code }}
+          FIX_EXIT: ${{ steps.fix.outputs.exit_code }}
+          FIX_FAILURE: ${{ steps.fix.outputs.failure_type }}
+          FIX_RESULT: ${{ steps.fix.outputs.result }}
+          HAS_CHANGES: ${{ steps.push.outputs.has_changes }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          REVIEW_EXIT: ${{ steps.review.outputs.exit_code }}
+          REVIEW_RESULT: ${{ steps.review.outputs.result }}
+          NEEDS_FIX: ${{ steps.review_check.outputs.needs_fix }}
+          PRFIX_EXIT: ${{ steps.prfix.outputs.exit_code }}
+          PRFIX_RESULT: ${{ steps.prfix.outputs.result }}
+          PRFIX_HAS_CHANGES: ${{ steps.prfix_push.outputs.has_changes }}
+          CHECK_FIX_MAX_ATTEMPTS: ${{ steps.checks_attempts.outputs.value }}
+          PR_CHECK_STATUS: ${{ steps.pr_checks.outputs.status }}
+          PR_CHECK_SUMMARY: ${{ steps.pr_checks.outputs.summary }}
+          CI_FIX_1_EXIT: ${{ steps.cifix.outputs.exit_code }}
+          CI_FIX_1_RESULT: ${{ steps.cifix.outputs.result }}
+          CI_FIX_1_HAS_CHANGES: ${{ steps.cifix_push.outputs.has_changes }}
+          PR_CHECK_STATUS_AFTER_FIX_1: ${{ steps.pr_checks_after_fix.outputs.status }}
+          PR_CHECK_SUMMARY_AFTER_FIX_1: ${{ steps.pr_checks_after_fix.outputs.summary }}
+          CI_FIX_2_EXIT: ${{ steps.cifix_2.outputs.exit_code }}
+          CI_FIX_2_RESULT: ${{ steps.cifix_2.outputs.result }}
+          CI_FIX_2_HAS_CHANGES: ${{ steps.cifix_2_push.outputs.has_changes }}
+          PR_CHECK_STATUS_AFTER_FIX_2: ${{ steps.pr_checks_after_fix_2.outputs.status }}
+          PR_CHECK_SUMMARY_AFTER_FIX_2: ${{ steps.pr_checks_after_fix_2.outputs.summary }}
+          CI_FIX_3_EXIT: ${{ steps.cifix_3.outputs.exit_code }}
+          CI_FIX_3_RESULT: ${{ steps.cifix_3.outputs.result }}
+          CI_FIX_3_HAS_CHANGES: ${{ steps.cifix_3_push.outputs.has_changes }}
+          PR_CHECK_STATUS_AFTER_FIX_3: ${{ steps.pr_checks_after_fix_3.outputs.status }}
+          PR_CHECK_SUMMARY_AFTER_FIX_3: ${{ steps.pr_checks_after_fix_3.outputs.summary }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          FOOTER="
+
+          ---
+          > 🤖 *${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} CI · [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+
+          if [ "$ANALYSIS_EXIT" = "0" ]; then
+            ANALYSIS_STATUS="✅ 완료"
+          else
+            ANALYSIS_STATUS="❌ 실패"
+          fi
+
+          if [ "$FIX_EXIT" != "0" ]; then
+            if [ "$FIX_FAILURE" = "usage_limit" ]; then
+              BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Auto Pipeline
+
+          ❌ 파이프라인 실패 — AI 에이전트 사용량 한도에 도달했습니다. 한도 리셋 후 다시 시도하세요.${FOOTER}"
+            elif [ "$FIX_FAILURE" = "auth_error" ]; then
+              BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Auto Pipeline
+
+          ❌ 파이프라인 실패 — 인증 오류. API 키를 확인하세요.${FOOTER}"
+            else
+              BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Auto Pipeline
+
+          ❌ 코드 패치 단계에서 실패했습니다.${FOOTER}"
+            fi
+          elif [ "$HAS_CHANGES" = "false" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Auto Pipeline
+
+          수정할 내용을 찾지 못했습니다.
+
+          <details><summary>에이전트 출력</summary>
+
+          ${FIX_RESULT}
+
+          </details>${FOOTER}"
+          elif [ -z "$PR_URL" ]; then
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Auto Pipeline
+
+          ❌ PR 생성에 실패했습니다.${FOOTER}"
+          else
+            FIX_STATUS="✅ 완료"
+            PR_STATUS="✅ ${PR_URL}"
+
+            if [ "$REVIEW_EXIT" = "0" ]; then
+              REVIEW_STATUS="✅ 완료"
+            else
+              REVIEW_STATUS="❌ 실패"
+            fi
+
+            if [ "$NEEDS_FIX" = "true" ]; then
+              if [ "$PRFIX_EXIT" = "0" ] && [ "$PRFIX_HAS_CHANGES" = "true" ]; then
+                PRFIX_STATUS="✅ 추가 패치 커밋 완료"
+              elif [ "$PRFIX_EXIT" = "0" ]; then
+                PRFIX_STATUS="✅ 수정 불필요"
+              else
+                PRFIX_STATUS="❌ 실패"
+              fi
+            else
+              PRFIX_STATUS="⏭️ 스킵 (CRITICAL/HIGH 이슈 없음)"
+            fi
+
+            EFFECTIVE_CHECK_FIX_ATTEMPTS="${CHECK_FIX_MAX_ATTEMPTS:-1}"
+            FINAL_CHECK_STATUS="$PR_CHECK_STATUS"
+            FINAL_CHECK_SUMMARY="$PR_CHECK_SUMMARY"
+            CHECKS_STATUS="⏭️ 미실행"
+            CHECKS_FIX_STATUS="⏭️ 스킵"
+            CHECK_FIX_ATTEMPTS_USED=0
+            CHECK_FIX_FAILED_STEP=false
+            CHECK_FIX_NO_CHANGES=false
+
+            if [ "$PR_CHECK_STATUS" = "failed" ]; then
+              if [ "$EFFECTIVE_CHECK_FIX_ATTEMPTS" = "0" ]; then
+                CHECKS_STATUS="❌ 실패"
+                CHECKS_FIX_STATUS="⏭️ 스킵 (max_check_fix_attempts=0)"
+              else
+                for attempt in 1 2 3; do
+                  if [ "$attempt" -gt "$EFFECTIVE_CHECK_FIX_ATTEMPTS" ]; then
+                    break
+                  fi
+
+                  EXIT_VAR="CI_FIX_${attempt}_EXIT"
+                  RESULT_VAR="CI_FIX_${attempt}_RESULT"
+                  CHANGES_VAR="CI_FIX_${attempt}_HAS_CHANGES"
+                  AFTER_STATUS_VAR="PR_CHECK_STATUS_AFTER_FIX_${attempt}"
+                  AFTER_SUMMARY_VAR="PR_CHECK_SUMMARY_AFTER_FIX_${attempt}"
+
+                  ATTEMPT_EXIT="${!EXIT_VAR:-}"
+                  ATTEMPT_RESULT="${!RESULT_VAR:-}"
+                  ATTEMPT_HAS_CHANGES="${!CHANGES_VAR:-}"
+                  ATTEMPT_AFTER_STATUS="${!AFTER_STATUS_VAR:-}"
+                  ATTEMPT_AFTER_SUMMARY="${!AFTER_SUMMARY_VAR:-}"
+
+                  if [ -z "$ATTEMPT_EXIT" ]; then
+                    break
+                  fi
+
+                  CHECK_FIX_ATTEMPTS_USED="$attempt"
+
+                  if [ "$ATTEMPT_EXIT" != "0" ]; then
+                    CHECK_FIX_FAILED_STEP=true
+                    CHECKS_FIX_STATUS="❌ ${attempt}차 패치 실패"
+                    break
+                  fi
+
+                  if [ "$ATTEMPT_HAS_CHANGES" != "true" ]; then
+                    CHECK_FIX_NO_CHANGES=true
+                    CHECKS_FIX_STATUS="⚠️ ${attempt}차 수정안 없음"
+                    break
+                  fi
+
+                  FINAL_CHECK_STATUS="$ATTEMPT_AFTER_STATUS"
+                  FINAL_CHECK_SUMMARY="$ATTEMPT_AFTER_SUMMARY"
+
+                  case "$FINAL_CHECK_STATUS" in
+                    passed)
+                      CHECKS_FIX_STATUS="✅ ${attempt}회 추가 패치 후 통과"
+                      break
+                      ;;
+                    no_checks)
+                      CHECKS_FIX_STATUS="✅ ${attempt}회 추가 패치 후 checks 없음"
+                      break
+                      ;;
+                    timed_out)
+                      CHECKS_FIX_STATUS="⏱️ ${attempt}회 추가 패치 후 재검증 타임아웃"
+                      break
+                      ;;
+                    api_error)
+                      CHECKS_FIX_STATUS="❌ ${attempt}회 추가 패치 후 조회 실패"
+                      break
+                      ;;
+                    failed)
+                      if [ "$attempt" -eq "$EFFECTIVE_CHECK_FIX_ATTEMPTS" ]; then
+                        CHECKS_FIX_STATUS="❌ ${attempt}회 추가 패치 후에도 실패"
+                      fi
+                      ;;
+                    *)
+                      CHECKS_FIX_STATUS="⚠️ ${attempt}회 추가 패치 후 결과 미확인"
+                      break
+                      ;;
+                  esac
+                done
+
+                case "$FINAL_CHECK_STATUS" in
+                  passed)
+                    CHECKS_STATUS="✅ 추가 패치 후 모두 통과"
+                    ;;
+                  no_checks)
+                    CHECKS_STATUS="✅ 추가 패치 후 checks 없음"
+                    ;;
+                  timed_out)
+                    CHECKS_STATUS="⏱️ 추가 패치 후 재검증 타임아웃"
+                    ;;
+                  api_error)
+                    CHECKS_STATUS="❌ 추가 패치 후 조회 실패"
+                    ;;
+                  failed)
+                    if [ "$CHECK_FIX_FAILED_STEP" = true ] || [ "$CHECK_FIX_NO_CHANGES" = true ] || [ "$CHECK_FIX_ATTEMPTS_USED" -eq 0 ]; then
+                      CHECKS_STATUS="❌ 실패"
+                    else
+                      CHECKS_STATUS="❌ ${CHECK_FIX_ATTEMPTS_USED}회 추가 패치 후에도 실패"
+                    fi
+                    ;;
+                  *)
+                    CHECKS_STATUS="⚠️ 추가 패치 후 결과 미확인"
+                    ;;
+                esac
+              fi
+            else
+              case "$PR_CHECK_STATUS" in
+                passed)
+                  CHECKS_STATUS="✅ 모두 통과"
+                  CHECKS_FIX_STATUS="⏭️ 스킵 (실패 없음)"
+                  ;;
+                no_checks)
+                  CHECKS_STATUS="⏭️ 등록된 checks 없음"
+                  CHECKS_FIX_STATUS="⏭️ 스킵 (등록된 checks 없음)"
+                  ;;
+                timed_out)
+                  CHECKS_STATUS="⏱️ 대기 타임아웃"
+                  CHECKS_FIX_STATUS="⏭️ 스킵 (checks 완료 전 종료)"
+                  ;;
+                api_error)
+                  CHECKS_STATUS="❌ 조회 실패"
+                  CHECKS_FIX_STATUS="⏭️ 스킵 (checks 조회 실패)"
+                  ;;
+                *)
+                  CHECKS_STATUS="⏭️ 미실행"
+                  CHECKS_FIX_STATUS="⏭️ 스킵"
+                  ;;
+              esac
+            fi
+
+            BODY="### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Auto Pipeline
+
+          | 단계 | 상태 |
+          |------|------|
+          | 1. 이슈 분석 | ${ANALYSIS_STATUS} |
+          | 2. 코드 패치 | ${FIX_STATUS} |
+          | 3. PR 생성 | ${PR_STATUS} |
+          | 4. 코드 리뷰 | ${REVIEW_STATUS} |
+          | 5. 리뷰 반영 | ${PRFIX_STATUS} |
+          | 6. PR checks 확인 | ${CHECKS_STATUS} |
+          | 7. checks 실패 반영 | ${CHECKS_FIX_STATUS} |${FOOTER}"
+          fi
+
+          if [ ${#BODY} -gt 65000 ]; then
+            BODY="${BODY:0:64900}
+
+          ...(truncated)"
+          fi
+
+          gh issue comment "$ISSUE_NUMBER" \
+            --repo "${{ github.repository }}" \
+            --body "$BODY"
+
+  notify-pipeline-timeout:
+    name: Notify Pipeline Timeout
+    needs: [auto-pipeline]
+    if: inputs.mode == 'auto-pipeline' && cancelled()
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+    steps:
+      - name: Post timeout comment
+        uses: youngrok-XCENA/relay/.github/actions/post-comment@main
+        with:
+          body: |
+            ### ${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} Auto Pipeline
+
+            ⏱️ 파이프라인이 ${{ inputs.timeout_minutes }}분 타임아웃으로 취소되었습니다. [워크플로우 로그](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})를 확인하세요.
+
+            ---
+            > 🤖 *${{ inputs.agent == 'claude' && 'Claude' || 'Codex' }} CI · [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+          target: ${{ github.event.issue.number }}
+          type: issue
+          repository: ${{ github.repository }}

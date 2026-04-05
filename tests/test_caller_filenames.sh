@@ -21,8 +21,8 @@ sed '/^main "\$@"$/d' "$INSTALL_SH" | sed '/^main() {$/,/^}$/d' > "$TMP_INSTALL"
 # shellcheck disable=SC1090
 source "$TMP_INSTALL"
 
-assert_eq "$(caller_filename_for_workflow claude)" "claude-caller.yml"
-assert_eq "$(caller_filename_for_workflow codex)" "codex-caller.yml"
-assert_eq "$(caller_filename_for_workflow something-else)" "something-else-caller.yml"
+assert_eq "$(caller_filename_for_workflow claude)" "relay-claude.yml"
+assert_eq "$(caller_filename_for_workflow codex)" "relay-codex.yml"
+assert_eq "$(caller_filename_for_workflow something-else)" "relay-something-else.yml"
 
 echo "ok"

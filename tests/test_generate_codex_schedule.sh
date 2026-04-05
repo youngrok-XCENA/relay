@@ -28,7 +28,7 @@ sed '/^main "\$@"$/d' "$INSTALL_SH" | sed '/^main() {$/,/^}$/d' > "$TMP_INSTALL"
 # shellcheck disable=SC1090
 source "$TMP_INSTALL"
 
-WORKFLOW_CONTENT="$(generate_codex "Example project" "YAML/Shell conventions" "*.yml *.yaml *.sh" "" "" "main")"
+WORKFLOW_CONTENT="$(generate_relay_caller codex "Example project" "YAML/Shell conventions" "*.yml *.yaml *.sh" "" "" "main")"
 
 # schedule/workflow_dispatch는 caller에 포함하지 않음 (사용자가 필요 시 직접 설정)
 assert_not_contains "$WORKFLOW_CONTENT" "schedule:"
