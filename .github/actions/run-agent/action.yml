@@ -1,0 +1,268 @@
+name: Run Agent
+description: Execute an AI agent CLI (Claude or Codex) and normalize outputs, failure types, and optional session persistence.
+
+inputs:
+  agent:
+    description: "Agent to run: claude or codex"
+    required: true
+  prompt:
+    required: true
+  resume_prompt:
+    required: false
+    default: ""
+  model:
+    required: false
+    default: ""
+  max_turns:
+    required: false
+    default: "30"
+  output_format:
+    required: false
+    default: text
+  resume_session:
+    required: false
+    default: "false"
+  session_id:
+    required: false
+    default: ""
+  session_file:
+    required: false
+    default: ""
+  node_path:
+    required: false
+    default: ""
+  codex_sandbox:
+    required: false
+    default: "read-only"
+
+outputs:
+  result:
+    value: ${{ steps.run.outputs.result }}
+  exit_code:
+    value: ${{ steps.run.outputs.exit_code }}
+  failure_type:
+    value: ${{ steps.run.outputs.failure_type }}
+  session_id:
+    value: ${{ steps.run.outputs.session_id }}
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        AGENT: ${{ inputs.agent }}
+        PROMPT: ${{ inputs.prompt }}
+        RESUME_PROMPT: ${{ inputs.resume_prompt }}
+        MODEL: ${{ inputs.model }}
+        MAX_TURNS: ${{ inputs.max_turns }}
+        OUTPUT_FORMAT: ${{ inputs.output_format }}
+        RESUME_SESSION: ${{ inputs.resume_session }}
+        SESSION_ID_INPUT: ${{ inputs.session_id }}
+        SESSION_FILE: ${{ inputs.session_file }}
+        NODE_PATH: ${{ inputs.node_path }}
+        SANDBOX: ${{ inputs.codex_sandbox }}
+      run: |
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+        if [ -n "$NODE_PATH" ]; then
+          export PATH="${NODE_PATH}:$PATH"
+        fi
+
+        PROMPT_FILE=$(mktemp)
+        OUTPUT_FILE=$(mktemp)
+        STDERR_FILE=$(mktemp)
+        MARKER_FILE=""
+
+        RESULT=""
+        EXIT_CODE=1
+        NEW_SESSION_ID=""
+        FAILURE_TYPE="generic"
+
+        # ── Agent-specific command builders ──
+
+        run_claude() {
+          local input_file="$1" output_file="$2" stderr_file="$3"
+          local agent_model="${MODEL:-claude-sonnet-4-6}"
+          set +e; set -o pipefail
+          claude --print \
+            --model "$agent_model" \
+            --max-turns "$MAX_TURNS" \
+            --output-format "$OUTPUT_FORMAT" \
+            < "$input_file" 2>"$stderr_file" | tee "$output_file"
+          local rc=${PIPESTATUS[0]}
+          set +o pipefail; set -e
+          return $rc
+        }
+
+        run_claude_resume() {
+          local input_file="$1" output_file="$2" stderr_file="$3" sid="$4"
+          local agent_model="${MODEL:-claude-sonnet-4-6}"
+          set +e; set -o pipefail
+          claude --print \
+            --resume "$sid" \
+            --model "$agent_model" \
+            --max-turns "$MAX_TURNS" \
+            --output-format "$OUTPUT_FORMAT" \
+            < "$input_file" 2>"$stderr_file" | tee "$output_file"
+          local rc=${PIPESTATUS[0]}
+          set +o pipefail; set -e
+          return $rc
+        }
+
+        run_codex() {
+          local input_file="$1" output_file="$2" log_file="$3"
+          local agent_model="${MODEL:-gpt-5.4}"
+          local -a base_args=(-m "$agent_model" -c 'model_reasoning_effort="high"')
+          local -a codex_args=("${base_args[@]}")
+          if [ "$SANDBOX" = "full-auto" ]; then
+            codex_args+=(--full-auto)
+          else
+            codex_args+=(--sandbox "$SANDBOX")
+          fi
+          set +e
+          codex exec "${codex_args[@]}" --color never -o "$output_file" \
+            - < "$input_file" > "$log_file" 2>&1
+          local rc=$?
+          set -e
+          cat "$log_file"
+          return $rc
+        }
+
+        run_codex_resume() {
+          local input_file="$1" output_file="$2" log_file="$3" sid="$4"
+          local agent_model="${MODEL:-gpt-5.4}"
+          local -a base_args=(-m "$agent_model" -c 'model_reasoning_effort="high"')
+          set +e
+          codex exec resume "$sid" \
+            "${base_args[@]}" -o "$output_file" \
+            - < "$input_file" > "$log_file" 2>&1
+          local rc=$?
+          set -e
+          cat "$log_file"
+          return $rc
+        }
+
+        parse_output() {
+          local output_file="$1" exit_code="$2"
+          if [ -s "$output_file" ]; then
+            if [ "$AGENT" = "claude" ] && [ "$OUTPUT_FORMAT" = "json" ]; then
+              RESULT=$(jq -r '.result // empty' "$output_file" 2>/dev/null || true)
+              NEW_SESSION_ID=$(jq -r '.session_id // empty' "$output_file" 2>/dev/null || true)
+              if [ -z "$RESULT" ] && [ "$exit_code" = "0" ]; then
+                RESULT=$(head -c 60000 "$output_file" 2>/dev/null || true)
+              fi
+            else
+              RESULT=$(head -c 60000 "$output_file" 2>/dev/null || true)
+            fi
+          fi
+        }
+
+        # ── Try session resume ──
+
+        if [ "$RESUME_SESSION" = "true" ] && [ -n "$SESSION_ID_INPUT" ]; then
+          RESUME_TEXT="$PROMPT"
+          if [ -n "$RESUME_PROMPT" ]; then
+            RESUME_TEXT="$RESUME_PROMPT"
+          fi
+          printf "%s" "$RESUME_TEXT" > "$PROMPT_FILE"
+
+          if [ "$AGENT" = "codex" ] && [ -n "$SESSION_FILE" ]; then
+            MARKER_FILE=$(mktemp)
+            touch "$MARKER_FILE"
+          fi
+
+          echo "::group::Attempting ${AGENT} session resume (${SESSION_ID_INPUT})"
+          if [ "$AGENT" = "claude" ]; then
+            run_claude_resume "$PROMPT_FILE" "$OUTPUT_FILE" "$STDERR_FILE" "$SESSION_ID_INPUT"
+            EXIT_CODE=$?
+          else
+            run_codex_resume "$PROMPT_FILE" "$OUTPUT_FILE" "$STDERR_FILE" "$SESSION_ID_INPUT"
+            EXIT_CODE=$?
+          fi
+          echo "::endgroup::"
+
+          if [ "$EXIT_CODE" = "0" ]; then
+            parse_output "$OUTPUT_FILE" "$EXIT_CODE"
+          fi
+
+          if [ -z "$RESULT" ]; then
+            echo "::warning::${AGENT} session resume failed (exit=${EXIT_CODE}), falling back to fresh session"
+            cat "$STDERR_FILE" >&2 2>/dev/null || true
+            if [ -n "$SESSION_FILE" ]; then
+              rm -f "$SESSION_FILE"
+            fi
+            EXIT_CODE=1
+          fi
+        fi
+
+        # ── Fallback: fresh session ──
+
+        if [ -z "$RESULT" ]; then
+          printf "%s" "$PROMPT" > "$PROMPT_FILE"
+
+          if [ "$AGENT" = "codex" ] && [ -n "$SESSION_FILE" ]; then
+            if [ -z "$MARKER_FILE" ]; then
+              MARKER_FILE=$(mktemp)
+            fi
+            touch "$MARKER_FILE"
+          fi
+
+          echo "::group::Running fresh ${AGENT} session"
+          if [ "$AGENT" = "claude" ]; then
+            run_claude "$PROMPT_FILE" "$OUTPUT_FILE" "$STDERR_FILE"
+            EXIT_CODE=$?
+          else
+            run_codex "$PROMPT_FILE" "$OUTPUT_FILE" "$STDERR_FILE"
+            EXIT_CODE=$?
+          fi
+          echo "::endgroup::"
+
+          parse_output "$OUTPUT_FILE" "$EXIT_CODE"
+        fi
+
+        # ── Save session ID ──
+
+        if [ "$AGENT" = "claude" ]; then
+          if [ -n "$SESSION_FILE" ] && [ -n "$NEW_SESSION_ID" ]; then
+            echo "$NEW_SESSION_ID" > "$SESSION_FILE"
+            echo "::notice::Saved session ${NEW_SESSION_ID} for next run"
+          fi
+        else
+          if [ -n "$SESSION_FILE" ] && [ -n "$MARKER_FILE" ]; then
+            LATEST_SESSION=$(find ~/.codex/sessions/ -name "rollout-*.jsonl" -newer "$MARKER_FILE" -type f 2>/dev/null | sort | tail -1)
+            if [ -n "$LATEST_SESSION" ]; then
+              NEW_SESSION_ID=$(head -1 "$LATEST_SESSION" | jq -r '.payload.id // empty' 2>/dev/null || true)
+            fi
+            if [ -n "$NEW_SESSION_ID" ]; then
+              echo "$NEW_SESSION_ID" > "$SESSION_FILE"
+              echo "::notice::Saved ${AGENT} session ${NEW_SESSION_ID} for next run"
+            fi
+          fi
+        fi
+
+        # ── Detect failure types ──
+
+        COMBINED="$RESULT $(cat "$STDERR_FILE" 2>/dev/null || true)"
+        if [ "$EXIT_CODE" != "0" ] && printf "%s" "$COMBINED" | grep -Eiq 'usage[ -]?limit|rate[ -]?limit|quota|too many requests|insufficient credits|credit balance|billing hard limit'; then
+          FAILURE_TYPE="usage_limit"
+        elif [ "$EXIT_CODE" != "0" ] && printf "%s" "$COMBINED" | grep -Eiq 'authentication failed|unauthorized|invalid.*token|api key.*invalid|401 '; then
+          FAILURE_TYPE="auth_error"
+        fi
+
+        RESULT=$(printf "%s" "$RESULT" | head -c 60000)
+
+        rm -f "$PROMPT_FILE" "$OUTPUT_FILE" "$STDERR_FILE"
+        if [ -n "$MARKER_FILE" ]; then
+          rm -f "$MARKER_FILE"
+        fi
+
+        {
+          echo "result<<GHEOF"
+          echo "$RESULT"
+          echo "GHEOF"
+          echo "exit_code=${EXIT_CODE}"
+          echo "failure_type=${FAILURE_TYPE}"
+          echo "session_id=${NEW_SESSION_ID}"
+        } >> "$GITHUB_OUTPUT"
